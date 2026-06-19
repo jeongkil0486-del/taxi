@@ -339,6 +339,88 @@ button,input,select{font-family:inherit}
   .card{padding:18px}
   .kpi-row{grid-template-columns:1fr}
 }
+
+/* ───────── 모바일 전용 추가 보정 (레이아웃 깨짐 방지) ───────── */
+@media(max-width:600px){
+  body{overflow-x:hidden}
+  .shell{padding:0 12px}
+
+  /* 상단바: 줄바꿈 허용 + 텍스트 줄임 */
+  .topbar{flex-wrap:wrap;gap:10px;padding:14px 0}
+  .brand .titles b{font-size:14px}
+  .brand .titles span{font-size:10px}
+  .session{flex-wrap:wrap;gap:8px;justify-content:flex-end}
+  .session .who{align-items:flex-end;max-width:110px}
+  .session .who b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+  .session .who span{font-size:10px}
+  .logout-btn{padding:7px 10px;font-size:11.5px}
+  .logout-btn span,.logout-btn{white-space:nowrap}
+
+  /* 탭 메뉴: 글자 줄임 방지, 균등 축소 */
+  .tab-row{padding:4px;gap:4px}
+  .tab{padding:10px 4px;font-size:11.5px;gap:4px}
+  .tab i{font-size:14px}
+
+  /* 카드/타이틀 */
+  .card{padding:14px}
+  .card-title{font-size:14px;flex-wrap:wrap}
+
+  /* 업로드 영역 */
+  .upload-zone{padding:1.8rem 1rem}
+  .upload-zone i{font-size:32px}
+  .upload-zone p{font-size:12.5px}
+  .btn-row{flex-wrap:wrap}
+  .btn{font-size:12.5px;padding:11px 10px}
+
+  /* 직원 정보 입력 폼 (이름/사번/내 정보 카드) */
+  .info-grid{grid-template-columns:1fr}
+  .addr-edit-row{flex-direction:column}
+  .addr-edit-row .btn{width:100%}
+
+  /* 영수증 입력 카드 내부 필드: 라벨/입력 줄바꿈 허용 */
+  .multi-form-list{grid-template-columns:1fr}
+  .field-row{flex-wrap:wrap;gap:6px}
+  .field-label{font-size:12px}
+  .fi{width:100%;max-width:100%;box-sizing:border-box}
+
+  /* 내역 리스트 */
+  .receipt-item{flex-wrap:wrap;padding:.7rem .85rem}
+  .receipt-info{min-width:120px}
+  .receipt-amount{font-size:13px}
+  .stats-row{grid-template-columns:1fr 1fr;gap:8px}
+  .stat-val{font-size:17px}
+
+  /* 엑셀 출력 선택 리스트 */
+  .rs-item{flex-wrap:wrap}
+  .rs-info{min-width:100px}
+  .info-box{font-size:11.5px;padding:11px 13px;line-height:1.7}
+
+  /* 관리자: 직원 ID 등록 + 금액 상한선 카드 */
+  .add-id-row{flex-direction:column;gap:8px}
+  .add-id-row input.fi{width:100%!important}
+  .add-id-row .btn{width:100%}
+
+  /* 관리자: 직원 명단 테이블 - 가로 스크롤 허용 */
+  .id-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .id-table{min-width:480px}
+
+  /* 관리자: 빠르게 보기 팝오버 - 화면 폭 넘지 않도록 */
+  .roster-popover-panel{width:min(320px,86vw);right:0;left:auto}
+
+  /* KPI 카드 */
+  .kpi{padding:13px 14px}
+  .kpi .k-val{font-size:18px}
+
+  /* 모달들: 좌우 여백 확보 */
+  .save-done-box{padding:1.8rem 1.3rem}
+  .img-modal img{max-width:94%}
+}
+
+@media(max-width:380px){
+  .session .who{display:none} /* 매우 좁은 화면에서는 이름 대신 아바타만 표시 */
+  .role-pill{font-size:9.5px;padding:3px 8px}
+  .tab{font-size:10.5px}
+}
 </style>
 </head>
 <body>
