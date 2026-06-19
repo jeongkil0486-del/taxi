@@ -426,6 +426,12 @@ button,input,select{font-family:inherit}
     </div>
 
     <div class="card">
+      <div class="card-title"><i class="ti ti-trash" style="color:var(--bad)"></i>전 직원 영수증 전체 삭제</div>
+      <div class="card-sub">모든 직원의 저장된 영수증 내역을 한 번에 삭제합니다. (직원 명단/사번은 유지됩니다)</div>
+      <button class="btn danger-outline sm" style="width:100%" onclick="adminClearAllReceipts()"><i class="ti ti-alert-triangle" style="font-size:12px"></i>전 직원 영수증 전체 삭제</button>
+    </div>
+
+    <div class="card">
       <div class="card-title"><i class="ti ti-user-plus"></i>새 직원 ID 등록</div>
       <div class="card-sub">이름과 사번을 입력하면 직원 명단에 추가됩니다.</div>
       <div class="add-id-row">
@@ -701,6 +707,26 @@ async function loadMaxAmount(){
 }
 
 // ════════════════════════════════════════════════════════════
+// 매월 5일: 저장된 개별 영수증 내역 전체 자동 삭제
+// (접속하는 누군가의 브라우저에서 5일이 되면, 그 달에 한 번만 실행됨)
+// ════════════════════════════════════════════════════════════
+const AUTO_CLEAR_DAY = 5;
+const AUTO_CLEAR_MARKER_KEY = 'config:lastAutoClearMonth';
+async function monthlyAutoClearIfDue(){
+  const now = new Date();
+  if(now.getDate() < AUTO_CLEAR_DAY) return;
+  const thisMonth = curMonthKey();
+  const lastCleared = await storeGet(AUTO_CLEAR_MARKER_KEY, '');
+  if(lastCleared === thisMonth) return; // 이번 달엔 이미 처리됨
+
+  const r = await ensureRoster();
+  for(const emp of r){
+    await storeSet(empReceiptsKey(emp.empId), []);
+  }
+  await storeSet(AUTO_CLEAR_MARKER_KEY, thisMonth);
+}
+
+// ════════════════════════════════════════════════════════════
 // 명단 초기화 (최초 1회: 저장소에 명단이 없으면 기본 명단 주입)
 // ════════════════════════════════════════════════════════════
 async function ensureRoster(){
@@ -760,6 +786,7 @@ async function doStaffLogin(){
   }
 
   session = {role:'staff', name: match.name, empId: match.empId};
+  saveSession();
   await enterStaffView();
 }
 
@@ -771,6 +798,7 @@ async function doAdminLogin(){
     return;
   }
   session = {role:'admin'};
+  saveSession();
   await enterAdminView();
 }
 
@@ -779,6 +807,7 @@ function doLogout(){
   records = [];
   selectedIds.clear();
   pendingImgs = [];
+  clearSession();
   document.getElementById('appLayout').classList.remove('show');
   document.getElementById('loginScreen').style.display = 'flex';
   document.getElementById('loginName').value = '';
@@ -787,6 +816,41 @@ function doLogout(){
   document.getElementById('adminView').style.display = 'none';
   document.getElementById('staffView').style.display = 'none';
   hideLoginErr();
+}
+
+// ════════════════════════════════════════════════════════════
+// 로그인 유지 (새로고침해도 로그아웃 전까지 세션 유지)
+// ════════════════════════════════════════════════════════════
+const SESSION_LS_KEY = 'receiptApp_session';
+function saveSession(){
+  try{ localStorage.setItem(SESSION_LS_KEY, JSON.stringify(session)); }catch(e){ /* 저장소 사용 불가 시 무시 */ }
+}
+function clearSession(){
+  try{ localStorage.removeItem(SESSION_LS_KEY); }catch(e){ /* 무시 */ }
+}
+function loadSavedSession(){
+  try{
+    const raw = localStorage.getItem(SESSION_LS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+async function restoreSessionIfAny(){
+  const saved = loadSavedSession();
+  if(!saved) return;
+  if(saved.role === 'admin'){
+    session = {role:'admin'};
+    await enterAdminView();
+  }else if(saved.role === 'staff' && saved.empId && saved.name){
+    // 직원이 삭제되지 않았는지 명단에서 재확인
+    roster = await ensureRoster();
+    const match = roster.find(r => r.empId === saved.empId);
+    if(match){
+      session = {role:'staff', name: match.name, empId: match.empId};
+      await enterStaffView();
+    }else{
+      clearSession();
+    }
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -819,6 +883,15 @@ async function adminSaveMaxAmount(){
   await storeSet(MAX_AMOUNT_KEY, maxAmount);
   document.getElementById('curMaxAmount').textContent = maxAmount.toLocaleString();
   toast('상한선이 저장되었습니다.');
+}
+
+async function adminClearAllReceipts(){
+  if(!confirm('모든 직원의 영수증 내역을 전체 삭제할까요?\n이 작업은 되돌릴 수 없습니다.')) return;
+  if(!confirm('정말로 진행하시겠습니까? 직원 명단/사번은 유지되지만 저장된 영수증은 모두 사라집니다.')) return;
+  for(const emp of roster){
+    await storeSet(empReceiptsKey(emp.empId), []);
+  }
+  toast('전 직원 영수증이 삭제되었습니다.');
 }
 
 async function renderAdminRoster(){
@@ -1569,8 +1642,12 @@ function toast(msg){
   setTimeout(()=>{t.style.opacity='0';},2400);
 }
 
-// ── 초기 실행: 명단을 미리 준비해 둔다 (최초 1회 기본 명단 주입)
-ensureRoster();
+// ── 초기 실행: 명단을 미리 준비해 두고, 저장된 로그인 세션이 있으면 복원한다
+(async function init(){
+  await ensureRoster();
+  await monthlyAutoClearIfDue();
+  await restoreSessionIfAny();
+})();
 
 </script>
 </body>
