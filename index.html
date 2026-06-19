@@ -649,12 +649,26 @@ function fbSafeKey(key){
 // ════════════════════════════════════════════════════════════
 // 저장소 헬퍼 (Firebase Realtime Database — 여러 기기에서 실시간 동일하게 보임)
 // ════════════════════════════════════════════════════════════
+let fbErrorShown = false;
+function fbAlertOnce(action, e){
+  console.error(action+' 실패:', e);
+  if(fbErrorShown) return; // 같은 세션에서 반복 경고 방지
+  fbErrorShown = true;
+  alert(
+    '⚠ Firebase 저장소 오류 (' + action + ' 실패)\n\n' +
+    '오류 내용: ' + (e && e.message ? e.message : e) + '\n\n' +
+    '저장이 안 되고 있을 가능성이 높습니다.\n' +
+    'Firebase 콘솔 → Realtime Database → 규칙(Rules)에서\n' +
+    '.read / .write 가 true 로 되어 있고 "게시(Publish)"까지 눌렀는지 확인해주세요.'
+  );
+  setTimeout(()=>{fbErrorShown=false;}, 8000); // 8초 후 다시 경고 가능
+}
 async function storeGet(key, fallback){
   try{
     const snap = await fbdb.ref('store/'+fbSafeKey(key)).get();
     return snap.exists() ? snap.val() : fallback;
   }catch(e){
-    console.error('불러오기 실패:', key, e);
+    fbAlertOnce('불러오기', e);
     return fallback;
   }
 }
@@ -663,12 +677,12 @@ async function storeSet(key, value){
     await fbdb.ref('store/'+fbSafeKey(key)).set(value===undefined?null:value);
     return true;
   }catch(e){
-    console.error('저장 실패:', key, e);
+    fbAlertOnce('저장', e);
     return false;
   }
 }
 async function storeDelete(key){
-  try{ await fbdb.ref('store/'+fbSafeKey(key)).remove(); }catch(e){ /* 키가 없으면 무시 */ }
+  try{ await fbdb.ref('store/'+fbSafeKey(key)).remove(); }catch(e){ fbAlertOnce('삭제', e); }
 }
 
 function empReceiptsKey(empId){ return 'receipts:'+empId; }
