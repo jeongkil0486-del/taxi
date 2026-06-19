@@ -1211,12 +1211,21 @@ function renderList(){
     </div>`).join('');
 }
 
-async function delRecord(btn){
-  const id = +btn.getAttribute('data-id');
-  if(!confirm('삭제할까요?')) return;
+async function deleteReceiptCore(id){
   records = records.filter(r=>r.id !== id);
   selectedIds.delete(id);
   await storeSet(empReceiptsKey(session.empId), records);
+}
+async function delRecord(btn){
+  const id = +btn.getAttribute('data-id');
+  if(!confirm('삭제할까요?')) return;
+  await deleteReceiptCore(id);
+  renderList();
+}
+async function delRecordById(id){
+  if(!confirm('삭제할까요?')) return;
+  await deleteReceiptCore(id);
+  renderRsList();
   renderList();
 }
 
@@ -1247,6 +1256,9 @@ function renderRsList(){
         <div class="rs-meta">코드: ${r.wcode||'—'} · ₩${r.amount.toLocaleString()}</div>
       </div>
       <i class="ti ${sel?'ti-circle-check':'ti-circle'}" style="font-size:18px;color:${sel?'var(--brand)':'#D8DBEA'}"></i>
+      <button class="del-btn" onclick="event.stopPropagation();delRecordById(${r.id})" title="삭제">
+        <i class="ti ti-trash"></i>
+      </button>
     </div>`;
   }).join('');
 }
