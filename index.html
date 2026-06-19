@@ -1149,6 +1149,38 @@ function chkLmt(el){
 // ════════════════════════════════════════════════════════════
 // 전체 저장
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// Cloudflare R2 이미지 업로드 (영수증 사진 저장용)
+// ════════════════════════════════════════════════════════════
+const R2_WORKER_URL = 'https://receipt-upload.jeongkil0486.workers.dev';
+const R2_UPLOAD_KEY = 'receipt2026secret';
+const R2_PUBLIC_BASE = 'https://pub-be2317b3c9d24feb815e13ac8bc6ca56.r2.dev';
+
+function dataUrlToBlob(dataUrl){
+  const [meta, b64] = dataUrl.split(',');
+  const mime = (meta.match(/data:(.*?);base64/)||[])[1] || 'image/jpeg';
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr], {type: mime});
+}
+
+async function uploadImageToR2(dataUrl, filename){
+  const blob = dataUrlToBlob(dataUrl);
+  const fd = new FormData();
+  fd.append('file', blob, filename || 'receipt.jpg');
+  const res = await fetch(R2_WORKER_URL, {
+    method: 'POST',
+    headers: { 'X-Upload-Key': R2_UPLOAD_KEY },
+    body: fd
+  });
+  if(!res.ok){
+    throw new Error('이미지 업로드 실패 (HTTP '+res.status+')');
+  }
+  const data = await res.json();
+  return R2_PUBLIC_BASE + '/' + data.key;
+}
+
 async function saveAll(){
   const items = document.querySelectorAll('.mfi');
   if(!items.length){ return; }
@@ -1167,6 +1199,25 @@ async function saveAll(){
     if(amount<=0){ alert(`${i+1}번: 금액을 입력해주세요.`); return; }
     newRecs.push({id: Date.now()+i, inout, wday, wcode, amount, img: pendingImgs[i]||null});
   }
+
+  // 영수증 사진을 Cloudflare R2에 업로드하고, Firebase에는 URL만 저장
+  const saveBtn = document.querySelector('#formActions .btn.primary');
+  const origLabel = saveBtn ? saveBtn.innerHTML : null;
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.innerHTML = '<i class="ti ti-loader" style="animation:spin .8s linear infinite;font-size:15px"></i> 사진 업로드 중...'; }
+
+  try{
+    for(let i=0; i<newRecs.length; i++){
+      const r = newRecs[i];
+      if(r.img && r.img.startsWith('data:')){
+        r.img = await uploadImageToR2(r.img, `receipt_${session.empId}_${Date.now()}_${i}.jpg`);
+      }
+    }
+  }catch(e){
+    alert('영수증 사진 업로드 중 오류가 발생했습니다: ' + e.message + '\n네트워크 상태를 확인하고 다시 시도해주세요.');
+    if(saveBtn){ saveBtn.disabled = false; saveBtn.innerHTML = origLabel; }
+    return;
+  }
+  if(saveBtn){ saveBtn.disabled = false; saveBtn.innerHTML = origLabel; }
 
   records.push(...newRecs);
   records.sort((a,b)=>a.wday.localeCompare(b.wday)||(a.inout==='출근'?-1:1));
@@ -1318,15 +1369,23 @@ function slotPx(s){
   return {w,h};
 }
 function resizeImg(url,w,h){
-  return new Promise(res=>{
-    const img=new Image(); img.onload=()=>{
+  return new Promise((res,rej)=>{
+    const img=new Image();
+    img.crossOrigin='anonymous';
+    img.onload=()=>{
       const c=document.createElement('canvas'); c.width=w; c.height=h;
       const ctx=c.getContext('2d');
       ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
       const sc=Math.max(w/img.width,h/img.height);
       ctx.drawImage(img,(w-img.width*sc)/2,(h-img.height*sc)/2,img.width*sc,img.height*sc);
-      res(c.toDataURL('image/jpeg',.82));
-    }; img.src=url;
+      try{
+        res(c.toDataURL('image/jpeg',.82));
+      }catch(e){
+        rej(new Error('이미지를 엑셀에 삽입하지 못했습니다 (CORS 설정을 확인해주세요): '+e.message));
+      }
+    };
+    img.onerror=()=>rej(new Error('영수증 사진을 불러오지 못했습니다: '+url));
+    img.src=url;
   });
 }
 
