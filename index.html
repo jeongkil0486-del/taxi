@@ -2094,8 +2094,38 @@ function parseTemplateCellDate(model, cellNode){
     if(m) return {day: parseInt(m[1], 10)};
     m = text.match(/^(\d{1,2})$/);
     if(m) return {day: parseInt(m[1], 10)};
+    m = text.match(/^(\d{1,2})\s*[일.\-/]?\s*[월화수목금토일]?(?:요일)?$/);
+    if(m) return {day: parseInt(m[1], 10)};
+    m = text.match(/^(\d{1,2})[\r\n\s]+[월화수목금토일]$/);
+    if(m) return {day: parseInt(m[1], 10)};
+    m = text.match(/(?:^|[\r\n\s])(\d{1,2})일?(?:$|[\r\n\s])/);
+    if(m) return {day: parseInt(m[1], 10)};
   }
   return null;
+}
+
+function scoreDaySequence(dayEntries){
+  if(!dayEntries.length) return {runLength: 0, orderedDays: []};
+  const ordered = [...dayEntries].sort((a, b)=>a.col - b.col);
+  let bestRun = [];
+  let currentRun = [];
+  for(const entry of ordered){
+    if(!currentRun.length){
+      currentRun = [entry];
+      continue;
+    }
+    const prev = currentRun[currentRun.length - 1];
+    if(entry.col === prev.col + 1 && entry.day === prev.day + 1){
+      currentRun.push(entry);
+    }else if(entry.day === prev.day && entry.col === prev.col){
+      continue;
+    }else{
+      if(currentRun.length > bestRun.length) bestRun = currentRun;
+      currentRun = [entry];
+    }
+  }
+  if(currentRun.length > bestRun.length) bestRun = currentRun;
+  return {runLength: bestRun.length, orderedDays: ordered, bestRun};
 }
 
 function findMonthClosingDayColumns(model, monthInfo){
@@ -2103,11 +2133,12 @@ function findMonthClosingDayColumns(model, monthInfo){
   const startCol = colLabelToNumber('F');
   const endCol = colLabelToNumber('AJ');
   const inspectedRows = [];
-  let best = {rowIndex: -1, dayMap: new Map(), debug: []};
+  let best = {rowIndex: -1, dayMap: new Map(), debug: [], runLength: 0, orderedDays: []};
 
   for(let r = 1; r <= maxHeaderRow; r++){
     const dayMap = new Map();
     const debug = [];
+    const dayEntries = [];
     for(let c = startCol; c <= Math.min(model.maxColumn, endCol); c++){
       const read = readTemplateCell(model, r, c);
       const rawValue = getTemplateCellComparableValue(model, read.cellNode);
@@ -2123,21 +2154,27 @@ function findMonthClosingDayColumns(model, monthInfo){
       if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
       if(parsed.month && parsed.month !== monthInfo.month) continue;
       if(!dayMap.has(parsed.day)) dayMap.set(parsed.day, c);
+      dayEntries.push({day: parsed.day, col: c, addr: read.addr, sourceAddr: read.sourceAddr});
     }
-    inspectedRows.push({row: r, cells: debug});
-    if(dayMap.size > best.dayMap.size){
-      best = {rowIndex: r, dayMap, debug};
+    const sequence = scoreDaySequence(dayEntries);
+    inspectedRows.push({row: r, cells: debug, runLength: sequence.runLength, dayCount: dayMap.size});
+    if(
+      sequence.runLength > best.runLength ||
+      (sequence.runLength === best.runLength && dayMap.size > best.dayMap.size)
+    ){
+      best = {rowIndex: r, dayMap, debug, runLength: sequence.runLength, orderedDays: sequence.orderedDays};
     }
   }
 
   if(best.dayMap.size === 0){
     console.log('[MonthClosing] 날짜 열 탐색 실패. 검사한 행/셀 목록:', inspectedRows);
   }else{
-    console.log('[MonthClosing] day -> column', Array.from(best.dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`));
+    console.log(`[MonthClosing] day -> column (${best.dayMap.size}) ${Array.from(best.dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`).join(', ')}`);
     console.log(
       '[MonthClosing] 날짜 열 탐색 결과',
       {
         headerRow: best.rowIndex,
+        runLength: best.runLength,
         range: 'F~AJ',
         days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))
       }
