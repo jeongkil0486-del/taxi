@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.8.0/dist/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <style>
@@ -331,6 +332,18 @@ button,input,select{font-family:inherit}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow-card)}
 .kpi .k-lbl{font-size:11.5px;color:var(--ink-faint);font-weight:700;margin-bottom:6px}
 .kpi .k-val{font-size:22px;font-weight:800;color:var(--ink);letter-spacing:-.01em}
+.admin-stack{display:grid;gap:22px}
+.admin-month-card .field{margin-bottom:12px}
+.admin-month-card .field label{text-align:left}
+.admin-month-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:8px}
+.admin-month-actions .btn{flex:1 1 220px}
+.admin-status{
+  margin-top:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);
+  background:var(--paper);font-size:12.5px;line-height:1.7;color:var(--ink-soft);font-weight:600;
+}
+.admin-status.good{background:var(--good-tint);border-color:#CBEFD9;color:#176D44}
+.admin-status.bad{background:var(--bad-tint);border-color:#F3CFCC;color:#A53630}
+.admin-status.warn{background:var(--gold-tint);border-color:#F0DDB4;color:#8A6420}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:760px){
@@ -539,9 +552,27 @@ button,input,select{font-family:inherit}
         </table>
       </div>
     </div>
+    <div class="card admin-month-card">
+      <div class="card-title"><i class="ti ti-file-spreadsheet"></i>월마감 다운로드</div>
+      <div class="card-sub">월마감 양식을 업로드하면 고정 양식 기준으로 날짜 열(F~AJ = 1일~31일)을 사용해 저장된 교통비를 채운 엑셀을 다운로드합니다.</div>
+      <div class="field">
+        <label for="adminMonthClosingMonth">대상 월</label>
+        <input type="month" id="adminMonthClosingMonth">
+      </div>
+      <div class="field">
+        <label for="adminMonthClosingFile">월마감 양식 (.xlsx)</label>
+        <input type="file" id="adminMonthClosingFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+      </div>
+      <div class="admin-month-actions">
+        <button class="btn" type="button" onclick="document.getElementById('adminMonthClosingFile').click()"><i class="ti ti-upload"></i>양식 업로드</button>
+        <button class="btn primary" type="button" id="adminMonthClosingBtn" onclick="adminDownloadMonthClosing()"><i class="ti ti-download"></i>월마감 엑셀 다운로드</button>
+      </div>
+      <div id="adminMonthClosingStatus" class="admin-status">월과 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.</div>
+    </div>
   </div>
 
   <!-- ══════════════ 직원 화면 ══════════════ -->
+
   <div id="staffView" style="display:none">
     <div class="tab-row">
       <button class="tab active" onclick="showTab('upload')" id="tab-upload"><i class="ti ti-camera"></i>촬영/업로드</button>
@@ -831,6 +862,8 @@ let pendingImgs = [];
 let viewYear = new Date().getFullYear();
 let viewMonth = new Date().getMonth()+1;
 let selectedIds = new Set();
+let monthClosingTemplateBuffer = null;
+let monthClosingTemplateName = '';
 
 // ════════════════════════════════════════════════════════════
 // 로그인 화면 탭 전환
@@ -956,6 +989,7 @@ async function enterAdminView(){
   pill.className = 'role-pill admin';
 
   await renderAdminRoster();
+  initAdminMonthClosing();
 }
 
 async function adminSaveMaxAmount(){
@@ -1523,6 +1557,15 @@ function slotPx(s){
   for(let r=s.fr+1;r<=s.tr;r++) h+=Math.round((ROW_H_PT[r]||15)*4/3);
   return {w,h};
 }
+function getExcelImageLoadUrl(url){
+  const raw = String(url || '').trim();
+  if(!raw) return raw;
+  if(raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
+  if(raw.startsWith(R2_PUBLIC_BASE + '/')){
+    return 'https://images.weserv.nl/?url=' + encodeURIComponent(raw.replace(/^https?:\/\//i, ''));
+  }
+  return raw;
+}
 function resizeImg(url,w,h){
   return new Promise((res,rej)=>{
     const img=new Image();
@@ -1540,7 +1583,7 @@ function resizeImg(url,w,h){
       }
     };
     img.onerror=()=>rej(new Error('영수증 사진을 불러오지 못했습니다: '+url));
-    img.src=url;
+    img.src=getExcelImageLoadUrl(url);
   });
 }
 
@@ -1636,6 +1679,7 @@ async function downloadXlsx(){
 
     // 이미지 삽입
     const hasImg=sel.some(r=>r.img);
+    let skippedImageCount = 0;
     if(hasImg){
       let drawXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
         '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '+
@@ -1648,47 +1692,54 @@ async function downloadXlsx(){
         if(!sel[i].img) continue;
         imgIdx++;
         const rId=`rId${imgIdx}`, fname=`image${imgIdx}.jpeg`;
-        const {w,h}=slotPx(SLOTS[i]);
-        const resized=await resizeImg(sel[i].img,w,h);
-        zip.file(`xl/media/${fname}`,b64ToBytes(resized.split(',')[1]));
-        const {w:cx,h:cy}=slotEmu(SLOTS[i]);
-        drawRels+=`<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${fname}"/>\n`;
-        drawXml+=`<xdr:twoCellAnchor editAs="oneCell">\n`+
-          `  <xdr:from><xdr:col>${SLOTS[i].fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\n`+
-          `  <xdr:to><xdr:col>${SLOTS[i].tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\n`+
-          `  <xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${1000+imgIdx}" name="Photo${imgIdx}" descr=""/>`+
-          `<xdr:cNvPicPr preferRelativeResize="0"><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>\n`+
-          `    <xdr:blipFill><a:blip r:embed="${rId}" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>\n`+
-          `    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>`+
-          `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr></xdr:pic>\n`+
-          `  <xdr:clientData/>\n</xdr:twoCellAnchor>\n`;
+        try{
+          const {w,h}=slotPx(SLOTS[i]);
+          const resized=await resizeImg(sel[i].img,w,h);
+          zip.file(`xl/media/${fname}`,b64ToBytes(resized.split(',')[1]));
+          const {w:cx,h:cy}=slotEmu(SLOTS[i]);
+          drawRels+=`<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${fname}"/>\n`;
+          drawXml+=`<xdr:twoCellAnchor editAs="oneCell">\n`+
+            `  <xdr:from><xdr:col>${SLOTS[i].fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\n`+
+            `  <xdr:to><xdr:col>${SLOTS[i].tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\n`+
+            `  <xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${1000+imgIdx}" name="Photo${imgIdx}" descr=""/>`+
+            `<xdr:cNvPicPr preferRelativeResize="0"><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>\n`+
+            `    <xdr:blipFill><a:blip r:embed="${rId}" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>\n`+
+            `    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>`+
+            `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr></xdr:pic>\n`+
+            `  <xdr:clientData/>\n</xdr:twoCellAnchor>\n`;
+        }catch(err){
+          skippedImageCount++;
+          console.error('[StaffDownload] 이미지 삽입 실패', sel[i].img, err);
+        }
         pf.style.width=(40+imgIdx*7)+'%';
       }
-      drawXml+='</xdr:wsDr>'; drawRels+='</Relationships>';
-      zip.file('xl/drawings/drawing1.xml',drawXml);
-      zip.file('xl/drawings/_rels/drawing1.xml.rels',drawRels);
-      if(!sheetXml.includes('<drawing')){
-        sheetXml=sheetXml.replace('</worksheet>','<drawing r:id="rIdDrw1"/></worksheet>');
-        zip.file('xl/worksheets/sheet1.xml',sheetXml);
+      if(drawXml.includes('<xdr:twoCellAnchor')){
+        drawXml+='</xdr:wsDr>'; drawRels+='</Relationships>';
+        zip.file('xl/drawings/drawing1.xml',drawXml);
+        zip.file('xl/drawings/_rels/drawing1.xml.rels',drawRels);
+        if(!sheetXml.includes('<drawing')){
+          sheetXml=sheetXml.replace('</worksheet>','<drawing r:id="rIdDrw1"/></worksheet>');
+          zip.file('xl/worksheets/sheet1.xml',sheetXml);
+        }
+        if(!relsXml.includes('drawing1.xml')){
+          relsXml=relsXml.replace('</Relationships>',
+            '<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>\n</Relationships>');
+          zip.file('xl/worksheets/_rels/sheet1.xml.rels',relsXml);
+        }
+        if(!ctXml.includes('"image/jpeg"'))
+          ctXml=ctXml.replace('</Types>','<Default Extension="jpeg" ContentType="image/jpeg"/>\n<Default Extension="jpg" ContentType="image/jpeg"/>\n</Types>');
+        if(!ctXml.includes('drawing1.xml'))
+          ctXml=ctXml.replace('</Types>',
+            '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>\n</Types>');
+        zip.file('[Content_Types].xml',ctXml);
       }
-      if(!relsXml.includes('drawing1.xml')){
-        relsXml=relsXml.replace('</Relationships>',
-          '<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>\n</Relationships>');
-        zip.file('xl/worksheets/_rels/sheet1.xml.rels',relsXml);
-      }
-      if(!ctXml.includes('"image/jpeg"'))
-        ctXml=ctXml.replace('</Types>','<Default Extension="jpeg" ContentType="image/jpeg"/>\n<Default Extension="jpg" ContentType="image/jpeg"/>\n</Types>');
-      if(!ctXml.includes('drawing1.xml'))
-        ctXml=ctXml.replace('</Types>',
-          '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>\n</Types>');
-      zip.file('[Content_Types].xml',ctXml);
     }
 
     pf.style.width='92%';
     const blob=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',compression:'DEFLATE',compressionOptions:{level:6}});
     saveAs(blob,'교통비영수증_'+session.name+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
     pf.style.width='100%';
-    toast('다운로드 완료!');
+    toast(skippedImageCount ? `다운로드 완료! (이미지 ${skippedImageCount}건 제외)` : '다운로드 완료!');
     setTimeout(()=>{pw.style.display='none';pf.style.width='0%';},1500);
 
     // 관리자 추적용 다운로드 기록 저장 (영수증/내역은 삭제하지 않고 그대로 유지)
@@ -1712,6 +1763,578 @@ async function downloadXlsx(){
 // ════════════════════════════════════════════════════════════
 // 기타 UI 유틸
 // ════════════════════════════════════════════════════════════
+function initAdminMonthClosing(){
+  const monthInput = document.getElementById('adminMonthClosingMonth');
+  const fileInput = document.getElementById('adminMonthClosingFile');
+  if(!monthInput || !fileInput) return;
+  if(!monthInput.value) monthInput.value = curMonthKey();
+  if(fileInput.dataset.bound === '1') return;
+  fileInput.dataset.bound = '1';
+  monthInput.addEventListener('change', ()=>{ previewAdminMonthClosingTemplate(); });
+  fileInput.addEventListener('change', async e=>{
+    const file = e.target.files && e.target.files[0];
+    if(!file){
+      monthClosingTemplateBuffer = null;
+      monthClosingTemplateName = '';
+      previewAdminMonthClosingTemplate();
+      return;
+    }
+    const isXlsx = /\.xlsx$/i.test(file.name);
+    if(!isXlsx){
+      monthClosingTemplateBuffer = null;
+      monthClosingTemplateName = '';
+      fileInput.value = '';
+      setAdminMonthClosingStatus('월마감 양식은 .xlsx 파일만 업로드할 수 있습니다.', 'bad');
+      return;
+    }
+    monthClosingTemplateBuffer = await file.arrayBuffer();
+    monthClosingTemplateName = file.name;
+    await previewAdminMonthClosingTemplate();
+  });
+  previewAdminMonthClosingTemplate();
+}
+
+function setAdminMonthClosingStatus(msg, tone){
+  const el = document.getElementById('adminMonthClosingStatus');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'admin-status' + (tone ? ' ' + tone : '');
+}
+
+function normalizeEmpName(v){
+  return String(v || '').replace(/\s+/g, '').trim();
+}
+
+function normalizeEmpId(v){
+  return String(v || '').replace(/\s+/g, '').replace(/-/g, '').trim().toUpperCase();
+}
+
+function parseReceiptMonthDay(wday){
+  const m = String(wday || '').trim().match(/^(\d{2})\/(\d{2})$/);
+  if(!m) return null;
+  return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+}
+
+function parseCurrencyLikeNumber(value){
+  if(typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if(typeof value === 'string'){
+    const cleaned = value.replace(/[^0-9.-]/g, '');
+    if(!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.') return 0;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function getReceiptAmountInfo(receipt){
+  const amountKeys = ['amount', 'price', 'fare', 'cost', 'total', 'receiptAmount', 'taxiAmount', '금액'];
+  for(const key of amountKeys){
+    if(receipt && receipt[key] != null && receipt[key] !== ''){
+      return {
+        field: key,
+        rawAmount: receipt[key],
+        parsedAmount: parseCurrencyLikeNumber(receipt[key]),
+        hasAmountField: true
+      };
+    }
+  }
+  return {
+    field: '',
+    rawAmount: '',
+    parsedAmount: 0,
+    hasAmountField: false
+  };
+}
+
+function getMonthClosingEmployeeKey(empLike){
+  const empIdKey = normalizeEmpId(empLike && empLike.empId);
+  if(empIdKey) return empIdKey;
+  return normalizeEmpName(empLike && empLike.name);
+}
+
+function normalizeReceiptObject(rawReceipt){
+  if(rawReceipt && typeof rawReceipt === 'object') return rawReceipt;
+  if(typeof rawReceipt === 'string'){
+    try{
+      const parsed = JSON.parse(rawReceipt);
+      if(parsed && typeof parsed === 'object') return parsed;
+    }catch(_){}
+  }
+  return rawReceipt || {};
+}
+
+function extractReceiptArray(rawRecords){
+  if(Array.isArray(rawRecords)) return rawRecords.map(normalizeReceiptObject);
+  if(rawRecords && typeof rawRecords === 'object'){
+    if(Array.isArray(rawRecords.records)) return rawRecords.records.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.items)) return rawRecords.items.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.list)) return rawRecords.list.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.data)) return rawRecords.data.map(normalizeReceiptObject);
+    return Object.values(rawRecords).map(normalizeReceiptObject);
+  }
+  return [];
+}
+
+function excelColLabel(n){
+  let s = '';
+  let x = n;
+  while(x > 0){
+    const mod = (x - 1) % 26;
+    s = String.fromCharCode(65 + mod) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s;
+}
+
+function excelAddr(row, col){
+  return excelColLabel(col) + String(row);
+}
+
+function parseExcelSerialDate(serial){
+  if(typeof serial !== 'number' || !isFinite(serial) || serial < 1) return null;
+  const wholeDays = Math.floor(serial);
+  if(wholeDays <= 31) return null;
+  const utcDays = wholeDays > 59 ? wholeDays - 1 : wholeDays;
+  const ms = (utcDays - 25569) * 86400 * 1000;
+  const date = new Date(ms);
+  if(Number.isNaN(date.getTime())) return null;
+  return {year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate()};
+}
+
+function getMonthInfo(){
+  const raw = (document.getElementById('adminMonthClosingMonth') || {}).value || '';
+  const m = raw.match(/^(\d{4})-(\d{2})$/);
+  if(!m) return null;
+  return {raw, year: parseInt(m[1], 10), month: parseInt(m[2], 10)};
+}
+
+function colLabelToNumber(label){
+  let n = 0;
+  for(const ch of String(label || '').toUpperCase()){
+    if(ch < 'A' || ch > 'Z') break;
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n;
+}
+
+function decodeCellRef(addr){
+  const m = String(addr || '').match(/^([A-Z]+)(\d+)$/i);
+  if(!m) return null;
+  return {col: colLabelToNumber(m[1]), row: parseInt(m[2], 10)};
+}
+
+function decodeRangeRef(ref){
+  const parts = String(ref || '').split(':');
+  const start = decodeCellRef(parts[0]);
+  const end = decodeCellRef(parts[1] || parts[0]);
+  if(!start || !end) return null;
+  return {start, end};
+}
+
+function getXmlChild(node, localName){
+  for(const child of Array.from(node.childNodes || [])){
+    if(child.nodeType === 1 && child.localName === localName) return child;
+  }
+  return null;
+}
+
+function getOrCreateXmlChild(doc, node, localName){
+  let child = getXmlChild(node, localName);
+  if(!child){
+    child = doc.createElementNS(node.namespaceURI, localName);
+    node.appendChild(child);
+  }
+  return child;
+}
+
+function readSharedString(siNode){
+  const parts = [];
+  function walk(node){
+    for(const child of Array.from(node.childNodes || [])){
+      if(child.nodeType !== 1) continue;
+      if(child.localName === 't') parts.push(child.textContent || '');
+      else walk(child);
+    }
+  }
+  walk(siNode);
+  return parts.join('');
+}
+
+async function loadMonthClosingTemplateModel(buffer){
+  const zip = await JSZip.loadAsync(buffer.slice(0));
+  const sheetXmlText = await zip.file('xl/worksheets/sheet1.xml').async('string');
+  const sharedStringsFile = zip.file('xl/sharedStrings.xml');
+  const parser = new DOMParser();
+  const sheetDoc = parser.parseFromString(sheetXmlText, 'application/xml');
+  const sheetDataNode = sheetDoc.getElementsByTagNameNS('*', 'sheetData')[0];
+  const sharedStrings = [];
+  if(sharedStringsFile){
+    const sharedDoc = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
+    const sis = sharedDoc.getElementsByTagNameNS('*', 'si');
+    for(const si of Array.from(sis)) sharedStrings.push(readSharedString(si));
+  }
+
+  const rowMap = new Map();
+  const cellMap = new Map();
+  const rows = sheetDoc.getElementsByTagNameNS('*', 'row');
+  let maxRow = 1;
+  let maxColumn = 1;
+  for(const rowNode of Array.from(rows)){
+    const rowNumber = parseInt(rowNode.getAttribute('r') || '0', 10);
+    if(rowNumber) rowMap.set(rowNumber, rowNode);
+    maxRow = Math.max(maxRow, rowNumber || 1);
+    const cells = rowNode.getElementsByTagNameNS('*', 'c');
+    for(const cellNode of Array.from(cells)){
+      const ref = cellNode.getAttribute('r');
+      if(!ref) continue;
+      cellMap.set(ref, cellNode);
+      const decoded = decodeCellRef(ref);
+      if(decoded) maxColumn = Math.max(maxColumn, decoded.col);
+    }
+  }
+
+  const merges = [];
+  const mergeCells = sheetDoc.getElementsByTagNameNS('*', 'mergeCell');
+  for(const mergeNode of Array.from(mergeCells)){
+    const ref = mergeNode.getAttribute('ref');
+    const decoded = decodeRangeRef(ref);
+    if(decoded) merges.push(decoded);
+  }
+
+  return {zip, sheetDoc, sheetDataNode, sharedStrings, rowMap, cellMap, merges, maxRow, maxColumn};
+}
+
+function readTemplateCell(model, row, col){
+  const addr = excelAddr(row, col);
+  let cellNode = model.cellMap.get(addr) || null;
+  let sourceAddr = addr;
+  if(!cellNode){
+    for(const merge of model.merges){
+      if(
+        row >= merge.start.row && row <= merge.end.row &&
+        col >= merge.start.col && col <= merge.end.col
+      ){
+        sourceAddr = excelAddr(merge.start.row, merge.start.col);
+        cellNode = model.cellMap.get(sourceAddr) || null;
+        break;
+      }
+    }
+  }
+  return {addr, sourceAddr, cellNode};
+}
+
+function getTemplateCellComparableValue(model, cellNode){
+  if(!cellNode) return null;
+  const t = cellNode.getAttribute('t') || '';
+  const vNode = getXmlChild(cellNode, 'v');
+  const isNode = getXmlChild(cellNode, 'is');
+  if(t === 's' && vNode){
+    const idx = parseInt(vNode.textContent || '', 10);
+    return Number.isFinite(idx) ? (model.sharedStrings[idx] ?? '') : '';
+  }
+  if(isNode) return readSharedString(isNode);
+  if(vNode){
+    const raw = vNode.textContent || '';
+    if(raw !== '' && /^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    return raw;
+  }
+  return null;
+}
+
+function getTemplateCellText(model, cellNode){
+  const raw = getTemplateCellComparableValue(model, cellNode);
+  return raw == null ? '' : String(raw).trim();
+}
+
+function compareCellRefs(a, b){
+  const da = decodeCellRef(a);
+  const db = decodeCellRef(b);
+  if(!da || !db) return String(a).localeCompare(String(b));
+  if(da.row !== db.row) return da.row - db.row;
+  return da.col - db.col;
+}
+
+function ensureTemplateRowNode(model, row){
+  let rowNode = model.rowMap.get(row) || null;
+  if(rowNode) return rowNode;
+  rowNode = model.sheetDoc.createElementNS(model.sheetDataNode.namespaceURI, 'row');
+  rowNode.setAttribute('r', String(row));
+  const existingRows = Array.from(model.sheetDataNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'row');
+  const nextRow = existingRows.find(node => parseInt(node.getAttribute('r') || '0', 10) > row);
+  if(nextRow) model.sheetDataNode.insertBefore(rowNode, nextRow);
+  else model.sheetDataNode.appendChild(rowNode);
+  model.rowMap.set(row, rowNode);
+  model.maxRow = Math.max(model.maxRow, row);
+  return rowNode;
+}
+
+function ensureTemplateCellNode(model, row, col){
+  const addr = excelAddr(row, col);
+  let cellNode = model.cellMap.get(addr) || null;
+  if(cellNode) return cellNode;
+  const rowNode = ensureTemplateRowNode(model, row);
+  cellNode = model.sheetDoc.createElementNS(rowNode.namespaceURI, 'c');
+  cellNode.setAttribute('r', addr);
+  const existingCells = Array.from(rowNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'c');
+  const nextCell = existingCells.find(node => compareCellRefs(node.getAttribute('r') || '', addr) > 0);
+  if(nextCell) rowNode.insertBefore(cellNode, nextCell);
+  else rowNode.appendChild(cellNode);
+  model.cellMap.set(addr, cellNode);
+  model.maxColumn = Math.max(model.maxColumn, col);
+  return cellNode;
+}
+
+function setTemplateNumericCellValue(model, row, col, value){
+  const read = readTemplateCell(model, row, col);
+  const cellNode = read.cellNode || ensureTemplateCellNode(model, row, col);
+  if(getXmlChild(cellNode, 'f')){
+    return {ok:false, reason:'formula-cell', cellRef: read.addr};
+  }
+  cellNode.removeAttribute('t');
+  const isNode = getXmlChild(cellNode, 'is');
+  if(isNode) cellNode.removeChild(isNode);
+  if(value == null || value === 0){
+    const vNode = getXmlChild(cellNode, 'v');
+    if(vNode) cellNode.removeChild(vNode);
+    return {ok:false, reason:'empty-or-zero', cellRef: read.addr};
+  }
+  const vNode = getOrCreateXmlChild(model.sheetDoc, cellNode, 'v');
+  vNode.textContent = String(value);
+  return {ok:true, reason:'written', cellRef: read.addr};
+}
+
+async function serializeMonthClosingWorkbook(model){
+  const serializer = new XMLSerializer();
+  const xml = serializer.serializeToString(model.sheetDoc);
+  model.zip.file('xl/worksheets/sheet1.xml', xml);
+  return model.zip.generateAsync({
+    type:'blob',
+    mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    compression:'DEFLATE',
+    compressionOptions:{level:6}
+  });
+}
+function getWsText(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return '';
+  if(cell.w != null && cell.w !== '') return String(cell.w).trim();
+  if(cell.v instanceof Date){
+    const mm = String(cell.v.getMonth() + 1).padStart(2, '0');
+    const dd = String(cell.v.getDate()).padStart(2, '0');
+    return mm + '/' + dd;
+  }
+  return String(cell.v == null ? '' : cell.v).trim();
+}
+
+function parseSheetDate(cell){
+  if(!cell) return null;
+  if(cell.v instanceof Date){
+    return {year: cell.v.getFullYear(), month: cell.v.getMonth() + 1, day: cell.v.getDate()};
+  }
+  if(typeof cell.v === 'number' && XLSX && XLSX.SSF){
+    const parsed = XLSX.SSF.parse_date_code(cell.v);
+    if(parsed && parsed.y && parsed.m && parsed.d){
+      return {year: parsed.y, month: parsed.m, day: parsed.d};
+    }
+  }
+  const text = String(cell.w || cell.v || '').trim();
+  let m = text.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
+  m = text.match(/^(\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+  m = text.match(/^(\d{1,2})$/);
+  if(m) return {day: parseInt(m[1], 10)};
+  return null;
+}
+
+function findMonthClosingDayColumns(){
+  const cols = {};
+  for(let day = 1; day <= 31; day++){
+    cols[day] = 5 + (day - 1);
+  }
+  return cols;
+}
+
+function findMonthClosingBlocks(ws, rosterList){
+  const idMap = new Map(rosterList.map(emp=>[normalizeEmpId(emp.empId), emp]));
+  const nameMap = new Map(rosterList.map(emp=>[normalizeEmpName(emp.name), emp]));
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const blocks = [];
+  const summaryRows = new Map();
+  for(let row = range.s.r + 1; row <= range.e.r + 1; row++){
+    const leftId = normalizeEmpId(getWsText(ws, 'B' + row));
+    const leftName = normalizeEmpName(getWsText(ws, 'C' + row));
+    const rightId = normalizeEmpId(getWsText(ws, 'AZ' + row));
+    const rightName = normalizeEmpName(getWsText(ws, 'BA' + row));
+    const blockEmp = idMap.get(leftId) || nameMap.get(leftName);
+    if(blockEmp){
+      let inRow = null;
+      let outRow = null;
+      for(let r = row; r <= Math.min(row + 6, range.e.r + 1); r++){
+        const label = normalizeEmpName(getWsText(ws, 'D' + r));
+        const sub = normalizeEmpName(getWsText(ws, 'E' + r));
+        if(label === '교통비' && sub === '출근') inRow = r;
+        if(label === '교통비' && sub === '퇴근') outRow = r;
+      }
+      if(inRow && !outRow) outRow = inRow + 1;
+      blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
+    }
+    const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
+    if(summaryEmp && !summaryRows.has(summaryEmp.empId)){
+      summaryRows.set(summaryEmp.empId, row);
+    }
+  }
+  return {blocks, summaryRows};
+}
+
+async function collectMonthClosingData(rosterList, monthInfo){
+  const entries = await Promise.all(rosterList.map(async emp=>{
+    const recs = await storeGet(empReceiptsKey(emp.empId), []);
+    const days = {};
+    let total = 0;
+    for(const rec of (recs || [])){
+      const parsed = parseReceiptMonthDay(rec.wday);
+      if(!parsed || parsed.month !== monthInfo.month) continue;
+      const dayBucket = days[parsed.day] || {출근: 0, 퇴근: 0};
+      const key = rec.inout === '퇴근' ? '퇴근' : '출근';
+      const amount = Number(rec.amount) || 0;
+      dayBucket[key] += amount;
+      days[parsed.day] = dayBucket;
+      total += amount;
+    }
+    return [emp.empId, {emp, days, total}];
+  }));
+  return Object.fromEntries(entries);
+}
+
+function clearWorksheetCell(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return;
+  delete cell.v;
+  delete cell.w;
+  delete cell.f;
+  cell.t = 'z';
+}
+
+function setWorksheetNumber(ws, addr, value){
+  if(!value){
+    clearWorksheetCell(ws, addr);
+    return;
+  }
+  const cell = ws[addr] || {};
+  cell.t = 'n';
+  cell.v = value;
+  delete cell.w;
+  delete cell.f;
+  ws[addr] = cell;
+}
+
+async function previewAdminMonthClosingTemplate(){
+  const monthInfo = getMonthInfo();
+  if(!monthInfo && !monthClosingTemplateBuffer){
+    setAdminMonthClosingStatus('월과 양식을 선택하면 자동 매핑 준비 상태를 여기에서 안내합니다.');
+    return;
+  }
+  if(!monthInfo){
+    setAdminMonthClosingStatus('먼저 대상 월을 선택해 주세요.', 'warn');
+    return;
+  }
+  if(!monthClosingTemplateBuffer){
+    setAdminMonthClosingStatus('월은 선택되었습니다. 이제 월마감 양식 .xlsx 파일을 업로드해 주세요.', 'warn');
+    return;
+  }
+  try{
+    const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns();
+    const monthLabel = monthInfo.raw.replace('-', '.');
+    setAdminMonthClosingStatus(
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 고정 매핑되었습니다. 대상 월: ${monthLabel}`,
+      (blocks.length && Object.keys(dayColumns).length) ? 'good' : 'warn'
+    );
+  }catch(e){
+    setAdminMonthClosingStatus('양식 분석 중 오류가 발생했습니다: ' + e.message, 'bad');
+  }
+}
+
+async function adminDownloadMonthClosing(){
+  const monthInfo = getMonthInfo();
+  if(!monthInfo){
+    alert('대상 월을 먼저 선택해 주세요.');
+    return;
+  }
+  if(!monthClosingTemplateBuffer){
+    alert('월마감 양식 .xlsx 파일을 먼저 업로드해 주세요.');
+    return;
+  }
+
+  const btn = document.getElementById('adminMonthClosingBtn');
+  const originalHtml = btn ? btn.innerHTML : '';
+  if(btn){
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ti ti-loader" style="animation:spin .8s linear infinite;font-size:15px"></i> 월마감 생성 중..';
+  }
+
+  try{
+    roster = await ensureRoster();
+    const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns();
+    const dayEntries = Object.entries(dayColumns);
+    if(!blocks.length){
+      throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
+    }
+    if(!dayEntries.length){
+      throw new Error('양식에서 날짜 칸을 찾지 못했습니다. 월 선택값과 양식의 날짜 행이 맞는지 확인해 주세요.');
+    }
+
+    const monthlyData = await collectMonthClosingData(roster, monthInfo);
+    let filledEmployees = 0;
+
+    for(const block of blocks){
+      if(!block.inRow && !block.outRow) continue;
+      const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
+      if(empData.total > 0) filledEmployees++;
+      for(const [, colIndex] of dayEntries){
+        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex + 1, null);
+        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex + 1, null);
+      }
+      for(const [dayKey, colIndex] of dayEntries){
+        const day = parseInt(dayKey, 10);
+        const dayData = empData.days[day] || {};
+        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex + 1, dayData['출근'] || 0);
+        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex + 1, dayData['퇴근'] || 0);
+      }
+    }
+
+    const out = await serializeMonthClosingWorkbook(model);
+    const monthTag = monthInfo.raw;
+    const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
+    saveAs(
+      out,
+      `${baseName}_${monthTag}_월마감완성.xlsx`
+    );
+
+    setAdminMonthClosingStatus(
+      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
+      'good'
+    );
+    toast('월마감 엑셀 다운로드 완료');
+  }catch(e){
+    console.error('[MonthClosing] 오류', e);
+    setAdminMonthClosingStatus('월마감 생성 중 오류가 발생했습니다: ' + e.message, 'bad');
+    alert('월마감 생성 중 오류가 발생했습니다.\n' + e.message);
+  }finally{
+    if(btn){
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  }
+}
+
 function openModal(id){
   const r=records.find(r=>r.id===id); if(!r||!r.img) return;
   document.getElementById('imgModalSrc').src=r.img;
