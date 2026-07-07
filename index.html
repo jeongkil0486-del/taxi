@@ -1557,6 +1557,15 @@ function slotPx(s){
   for(let r=s.fr+1;r<=s.tr;r++) h+=Math.round((ROW_H_PT[r]||15)*4/3);
   return {w,h};
 }
+function getExcelImageLoadUrl(url){
+  const raw = String(url || '').trim();
+  if(!raw) return raw;
+  if(raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
+  if(raw.startsWith(R2_PUBLIC_BASE + '/')){
+    return 'https://images.weserv.nl/?url=' + encodeURIComponent(raw.replace(/^https?:\/\//i, ''));
+  }
+  return raw;
+}
 function resizeImg(url,w,h){
   return new Promise((res,rej)=>{
     const img=new Image();
@@ -1574,7 +1583,7 @@ function resizeImg(url,w,h){
       }
     };
     img.onerror=()=>rej(new Error('영수증 사진을 불러오지 못했습니다: '+url));
-    img.src=url;
+    img.src=getExcelImageLoadUrl(url);
   });
 }
 
