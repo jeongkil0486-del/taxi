@@ -553,14 +553,10 @@ button,input,select{font-family:inherit}
     </div>
     <div class="card admin-month-card">
       <div class="card-title"><i class="ti ti-file-spreadsheet"></i>월마감 다운로드</div>
-      <div class="card-sub">월마감 양식을 업로드한 뒤 날짜가 있는 행 번호를 지정하면, 해당 행의 F~AJ 열을 기준으로 날짜 칸을 매핑해 저장된 교통비를 채운 엑셀을 다운로드합니다.</div>
+      <div class="card-sub">월마감 양식을 업로드하면 고정 양식 기준으로 날짜 열(F~AJ = 1일~31일)을 사용해 저장된 교통비를 채운 엑셀을 다운로드합니다.</div>
       <div class="field">
         <label for="adminMonthClosingMonth">대상 월</label>
         <input type="month" id="adminMonthClosingMonth">
-      </div>
-      <div class="field">
-        <label for="adminMonthClosingDateRow">날짜 행</label>
-        <input type="number" id="adminMonthClosingDateRow" min="1" step="1" value="13" placeholder="예: 13">
       </div>
       <div class="field">
         <label for="adminMonthClosingFile">월마감 양식 (.xlsx)</label>
@@ -570,7 +566,7 @@ button,input,select{font-family:inherit}
         <button class="btn" type="button" onclick="document.getElementById('adminMonthClosingFile').click()"><i class="ti ti-upload"></i>양식 업로드</button>
         <button class="btn primary" type="button" id="adminMonthClosingBtn" onclick="adminDownloadMonthClosing()"><i class="ti ti-download"></i>월마감 엑셀 다운로드</button>
       </div>
-      <div id="adminMonthClosingStatus" class="admin-status">월, 날짜 행, 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.</div>
+      <div id="adminMonthClosingStatus" class="admin-status">월과 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.</div>
     </div>
   </div>
 
@@ -1752,14 +1748,11 @@ async function downloadXlsx(){
 function initAdminMonthClosing(){
   const monthInput = document.getElementById('adminMonthClosingMonth');
   const fileInput = document.getElementById('adminMonthClosingFile');
-  const dateRowInput = document.getElementById('adminMonthClosingDateRow');
-  if(!monthInput || !fileInput || !dateRowInput) return;
+  if(!monthInput || !fileInput) return;
   if(!monthInput.value) monthInput.value = curMonthKey();
-  if(!dateRowInput.value) dateRowInput.value = '13';
   if(fileInput.dataset.bound === '1') return;
   fileInput.dataset.bound = '1';
   monthInput.addEventListener('change', ()=>{ previewAdminMonthClosingTemplate(); });
-  dateRowInput.addEventListener('change', ()=>{ previewAdminMonthClosingTemplate(); });
   fileInput.addEventListener('change', async e=>{
     const file = e.target.files && e.target.files[0];
     if(!file){
@@ -1796,12 +1789,6 @@ function normalizeEmpName(v){
 
 function normalizeEmpId(v){
   return String(v || '').replace(/\s+/g, '').replace(/-/g, '').trim().toUpperCase();
-}
-
-function getMonthClosingDateRow(){
-  const raw = (document.getElementById('adminMonthClosingDateRow') || {}).value || '13';
-  const parsed = parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 13;
 }
 
 function parseReceiptMonthDay(wday){
@@ -2117,77 +2104,21 @@ function parseTemplateCellDate(model, cellNode){
   return null;
 }
 
-function scoreDaySequence(dayEntries){
-  if(!dayEntries.length) return {runLength: 0, orderedDays: []};
-  const ordered = [...dayEntries].sort((a, b)=>a.col - b.col);
-  let bestRun = [];
-  let currentRun = [];
-  for(const entry of ordered){
-    if(!currentRun.length){
-      currentRun = [entry];
-      continue;
-    }
-    const prev = currentRun[currentRun.length - 1];
-    if(entry.col === prev.col + 1 && entry.day === prev.day + 1){
-      currentRun.push(entry);
-    }else if(entry.day === prev.day && entry.col === prev.col){
-      continue;
-    }else{
-      if(currentRun.length > bestRun.length) bestRun = currentRun;
-      currentRun = [entry];
-    }
-  }
-  if(currentRun.length > bestRun.length) bestRun = currentRun;
-  return {runLength: bestRun.length, orderedDays: ordered, bestRun};
-}
-
-function findMonthClosingDayColumns(model, monthInfo, forcedRow){
+function findMonthClosingDayColumns(){
   const startCol = colLabelToNumber('F');
-  const endCol = colLabelToNumber('AJ');
-  const inspectedRows = [];
-  const targetRow = Math.min(Math.max(parseInt(forcedRow, 10) || 13, 1), model.maxRow);
   const dayMap = new Map();
-  const debug = [];
-  const dayEntries = [];
-
-  for(let c = startCol; c <= Math.min(model.maxColumn, endCol); c++){
-    const read = readTemplateCell(model, targetRow, c);
-    const rawValue = getTemplateCellComparableValue(model, read.cellNode);
-    const displayValue = getTemplateCellText(model, read.cellNode);
-    const parsed = parseTemplateCellDate(model, read.cellNode);
-    debug.push({
-      addr: read.addr,
-      sourceAddr: read.sourceAddr,
-      v: rawValue,
-      text: displayValue,
-      parsed: parsed ? `${parsed.year || ''}/${parsed.month || ''}/${parsed.day || ''}` : ''
-    });
-    if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
-    if(parsed.month && parsed.month !== monthInfo.month) continue;
-    if(!dayMap.has(parsed.day)) dayMap.set(parsed.day, c);
-    dayEntries.push({day: parsed.day, col: c, addr: read.addr, sourceAddr: read.sourceAddr});
+  for(let day = 1; day <= 31; day++){
+    dayMap.set(day, startCol + (day - 1));
   }
-  const sequence = scoreDaySequence(dayEntries);
-  const best = {rowIndex: targetRow, dayMap, debug, runLength: sequence.runLength, orderedDays: sequence.orderedDays};
-  inspectedRows.push({row: targetRow, cells: debug, runLength: sequence.runLength, dayCount: dayMap.size});
-
-  if(best.dayMap.size === 0){
-    console.log('[MonthClosing] 날짜 열 탐색 실패. 검사한 행/셀 목록:', inspectedRows);
-  }else{
-    console.log(`[MonthClosing] day -> column (${best.dayMap.size}) ${Array.from(best.dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`).join(', ')}`);
-    console.log(
-      '[MonthClosing] 날짜 열 탐색 결과',
-      {
-        headerRow: best.rowIndex,
-        runLength: best.runLength,
-        forcedRow: targetRow,
-        range: 'F~AJ',
-        days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))
-      }
-    );
-  }
-
-  return {...best, inspectedRows};
+  console.log(`[MonthClosing] day -> column (${dayMap.size}) ${Array.from(dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`).join(', ')}`);
+  console.log(
+    '[MonthClosing] 날짜 열 고정 매핑',
+    {
+      range: 'F~AJ',
+      days: Array.from(dayMap.entries()).map(([day, col])=>({day, col, colLabel: excelColLabel(col)}))
+    }
+  );
+  return {rowIndex: null, dayMap, debug: [], runLength: 31, orderedDays: [], inspectedRows: []};
 }
 
 function findMonthClosingBlocks(model, rosterList){
@@ -2321,9 +2252,8 @@ async function serializeMonthClosingWorkbook(model){
 
 async function previewAdminMonthClosingTemplate(){
   const monthInfo = getMonthInfo();
-  const dateRow = getMonthClosingDateRow();
   if(!monthInfo && !monthClosingTemplateBuffer){
-    setAdminMonthClosingStatus('월, 날짜 행, 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.');
+    setAdminMonthClosingStatus('월과 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.');
     return;
   }
   if(!monthInfo){
@@ -2337,10 +2267,10 @@ async function previewAdminMonthClosingTemplate(){
   try{
     const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
     const {blocks, summaryRows} = findMonthClosingBlocks(model, roster);
-    const dayScan = findMonthClosingDayColumns(model, monthInfo, dateRow);
+    const dayScan = findMonthClosingDayColumns();
     const monthLabel = monthInfo.raw.replace('-', '.');
     setAdminMonthClosingStatus(
-      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 감지되었습니다. 대상 월: ${monthLabel}${dayScan.rowIndex >= 0 ? `, 날짜 행: ${dayScan.rowIndex}행` : ''}`,
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 고정 매핑되었습니다. 대상 월: ${monthLabel}`,
       (blocks.length && dayScan.dayMap.size) ? 'good' : 'warn'
     );
   }catch(e){
@@ -2350,7 +2280,6 @@ async function previewAdminMonthClosingTemplate(){
 
 async function adminDownloadMonthClosing(){
   const monthInfo = getMonthInfo();
-  const dateRow = getMonthClosingDateRow();
   if(!monthInfo){
     alert('대상 월을 먼저 선택해 주세요.');
     return;
@@ -2383,14 +2312,14 @@ async function adminDownloadMonthClosing(){
     const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
     const {blocks} = findMonthClosingBlocks(model, roster);
     console.log('[MonthClosing] 직원 매핑 완료', {blockCount: blocks.length});
-    const dayScan = findMonthClosingDayColumns(model, monthInfo, dateRow);
+    const dayScan = findMonthClosingDayColumns();
     console.log('[MonthClosing] 날짜 매핑 완료', {dayColumnCount: dayScan.dayMap.size});
     const dayEntries = Array.from(dayScan.dayMap.entries());
     if(!blocks.length){
       throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
     }
     if(!dayEntries.length){
-      throw new Error('양식에서 날짜 칸을 찾지 못했습니다. 월 선택값과 양식의 날짜 행이 맞는지 확인해 주세요.');
+      throw new Error('고정 날짜 열 매핑(F~AJ = 1일~31일)을 생성하지 못했습니다.');
     }
 
     console.log('[MonthClosing] Firebase 영수증 조회 시작');
