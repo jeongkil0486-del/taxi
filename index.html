@@ -2159,6 +2159,7 @@ function findMonthClosingBlocks(ws, rosterList){
         if(label === '교통비' && sub === '출근') inRow = r;
         if(label === '교통비' && sub === '퇴근') outRow = r;
       }
+      if(inRow && !outRow) outRow = inRow + 1;
       blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
     }
     const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
