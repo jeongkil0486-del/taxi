@@ -1797,6 +1797,37 @@ function parseReceiptMonthDay(wday){
   return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
 }
 
+function parseCurrencyLikeNumber(value){
+  if(typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if(typeof value === 'string'){
+    const cleaned = value.replace(/[^0-9.-]/g, '');
+    if(!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.') return 0;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function getReceiptAmountInfo(receipt){
+  const amountKeys = ['amount', 'price', 'fare', 'cost', 'total', 'receiptAmount', 'taxiAmount', '금액'];
+  for(const key of amountKeys){
+    if(receipt && receipt[key] != null && receipt[key] !== ''){
+      return {
+        field: key,
+        rawAmount: receipt[key],
+        parsedAmount: parseCurrencyLikeNumber(receipt[key]),
+        hasAmountField: true
+      };
+    }
+  }
+  return {
+    field: '',
+    rawAmount: '',
+    parsedAmount: 0,
+    hasAmountField: false
+  };
+}
+
 function excelColLabel(n){
   let s = '';
   let x = n;
@@ -2134,16 +2165,17 @@ async function collectMonthClosingData(rosterList, monthInfo){
       const parsed = parseReceiptMonthDay(rec.wday);
       if(!parsed || parsed.month !== monthInfo.month) continue;
       receiptCount++;
-      console.log('[MonthClosing] 월별 영수증 집계', {
-        empName: emp.name,
-        empId: emp.empId,
-        date: rec.wday,
-        amount: Number(rec.amount) || 0,
-        direction: rec.inout === '퇴근' ? '퇴근' : '출근'
-      });
+      console.log(`[MonthClosing] receipt sample ${JSON.stringify(rec).slice(0, 500)}`);
+      const amountInfo = getReceiptAmountInfo(rec);
+      if(!amountInfo.hasAmountField){
+        console.log(`[MonthClosing] receipt amount field missing emp=${emp.name} empId=${emp.empId} keys=${Object.keys(rec || {}).join(',')}`);
+      }
+      console.log(
+        `[MonthClosing] receipt parsed emp=${emp.name} empId=${emp.empId} date=${rec.wday} dir=${rec.inout === '퇴근' ? '퇴근' : '출근'} field=${amountInfo.field || 'none'} rawAmount=${String(amountInfo.rawAmount)} parsedAmount=${amountInfo.parsedAmount}`
+      );
       const dayBucket = days[parsed.day] || {출근: 0, 퇴근: 0};
       const key = rec.inout === '퇴근' ? '퇴근' : '출근';
-      const amount = Number(rec.amount) || 0;
+      const amount = amountInfo.parsedAmount;
       dayBucket[key] += amount;
       days[parsed.day] = dayBucket;
       total += amount;
