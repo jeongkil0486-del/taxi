@@ -2176,12 +2176,9 @@ function verifyTemplateNumericCellValue(model, row, col, expected){
   const read = readTemplateCell(model, row, col);
   const foundValue = getTemplateCellComparableValue(model, read.cellNode);
   const found = Number(foundValue) === Number(expected);
-  console.log('[MonthClosing] XML 검증', {
-    cellRef: excelAddr(row, col),
-    expected,
-    found,
-    actual: foundValue
-  });
+  console.log(
+    `[MonthClosing] XMLVERIFY cell=${excelAddr(row, col)} row=${row} col=${excelColLabel(col)} expected=${expected} found=${found} actual=${foundValue}`
+  );
   return found;
 }
 
@@ -2299,56 +2296,44 @@ async function adminDownloadMonthClosing(){
         const dayData = empData.days[day] || {};
         if(block.inRow){
           summary.writeAttempts++;
-          const targetInfo = {
-            cellRef: excelAddr(block.inRow, colIndex),
-            amount: dayData['출근'] || 0,
-            empName: block.emp.name,
-            day,
-            direction: '출근'
-          };
-          console.log('[MonthClosing] 셀 쓰기', targetInfo);
+          const targetCellRef = excelAddr(block.inRow, colIndex);
+          const targetAmount = dayData['출근'] || 0;
+          console.log(
+            `[MonthClosing] WRITE emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+          );
           const result = setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
           if(result.ok){
             summary.writeSuccesses++;
-            console.log('[MonthClosing] 셀 쓰기 성공', targetInfo);
+            console.log(
+              `[MonthClosing] WRITE_OK emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+            );
             verifyTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
           }else{
             summary.skippedReasons[result.reason] = (summary.skippedReasons[result.reason] || 0) + 1;
-            console.log('[MonthClosing] 셀 쓰기 스킵', {
-              reason: result.reason,
-              empName: block.emp.name,
-              day,
-              direction: '출근',
-              targetRow: block.inRow,
-              targetCol: colIndex
-            });
+            console.log(
+              `[MonthClosing] SKIP reason=${result.reason} emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+            );
           }
         }
         if(block.outRow){
           summary.writeAttempts++;
-          const targetInfo = {
-            cellRef: excelAddr(block.outRow, colIndex),
-            amount: dayData['퇴근'] || 0,
-            empName: block.emp.name,
-            day,
-            direction: '퇴근'
-          };
-          console.log('[MonthClosing] 셀 쓰기', targetInfo);
+          const targetCellRef = excelAddr(block.outRow, colIndex);
+          const targetAmount = dayData['퇴근'] || 0;
+          console.log(
+            `[MonthClosing] WRITE emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+          );
           const result = setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
           if(result.ok){
             summary.writeSuccesses++;
-            console.log('[MonthClosing] 셀 쓰기 성공', targetInfo);
+            console.log(
+              `[MonthClosing] WRITE_OK emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+            );
             verifyTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
           }else{
             summary.skippedReasons[result.reason] = (summary.skippedReasons[result.reason] || 0) + 1;
-            console.log('[MonthClosing] 셀 쓰기 스킵', {
-              reason: result.reason,
-              empName: block.emp.name,
-              day,
-              direction: '퇴근',
-              targetRow: block.outRow,
-              targetCol: colIndex
-            });
+            console.log(
+              `[MonthClosing] SKIP reason=${result.reason} emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
+            );
           }
         }
       }
@@ -2375,7 +2360,9 @@ async function adminDownloadMonthClosing(){
     setAdminMonthClosingStatus('월마감 생성 중 오류가 발생했습니다: ' + e.message, 'bad');
     alert('월마감 생성 중 오류가 발생했습니다.\n' + e.message);
   }finally{
-    console.log('[MonthClosing] summary', summary);
+    console.log(
+      `[MonthClosing] summary receipt=${summary.receiptCount} mapped=${summary.mappedEmployeeCount} dayCols=${summary.dayColumnCount} attempts=${summary.writeAttempts} success=${summary.writeSuccesses} skipped=${JSON.stringify(summary.skippedReasons)}`
+    );
     if(btn){
       btn.disabled = false;
       btn.innerHTML = originalHtml;
