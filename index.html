@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.8.0/dist/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <style>
@@ -1889,268 +1890,77 @@ function getMonthInfo(){
   if(!m) return null;
   return {raw, year: parseInt(m[1], 10), month: parseInt(m[2], 10)};
 }
-
-function colLabelToNumber(label){
-  let n = 0;
-  for(const ch of String(label || '').toUpperCase()){
-    if(ch < 'A' || ch > 'Z') break;
-    n = n * 26 + (ch.charCodeAt(0) - 64);
+function getWsText(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return '';
+  if(cell.w != null && cell.w !== '') return String(cell.w).trim();
+  if(cell.v instanceof Date){
+    const mm = String(cell.v.getMonth() + 1).padStart(2, '0');
+    const dd = String(cell.v.getDate()).padStart(2, '0');
+    return mm + '/' + dd;
   }
-  return n;
+  return String(cell.v == null ? '' : cell.v).trim();
 }
 
-function decodeCellRef(addr){
-  const m = String(addr || '').match(/^([A-Z]+)(\d+)$/i);
-  if(!m) return null;
-  return {col: colLabelToNumber(m[1]), row: parseInt(m[2], 10)};
-}
-
-function decodeRangeRef(ref){
-  const parts = String(ref || '').split(':');
-  const start = decodeCellRef(parts[0]);
-  const end = decodeCellRef(parts[1] || parts[0]);
-  if(!start || !end) return null;
-  return {start, end};
-}
-
-function getXmlChild(node, localName){
-  for(const child of Array.from(node.childNodes || [])){
-    if(child.nodeType === 1 && child.localName === localName) return child;
+function parseSheetDate(cell){
+  if(!cell) return null;
+  if(cell.v instanceof Date){
+    return {year: cell.v.getFullYear(), month: cell.v.getMonth() + 1, day: cell.v.getDate()};
   }
+  if(typeof cell.v === 'number' && XLSX && XLSX.SSF){
+    const parsed = XLSX.SSF.parse_date_code(cell.v);
+    if(parsed && parsed.y && parsed.m && parsed.d){
+      return {year: parsed.y, month: parsed.m, day: parsed.d};
+    }
+  }
+  const text = String(cell.w || cell.v || '').trim();
+  let m = text.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
+  m = text.match(/^(\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+  m = text.match(/^(\d{1,2})$/);
+  if(m) return {day: parseInt(m[1], 10)};
   return null;
 }
 
-function getOrCreateXmlChild(doc, node, localName){
-  let child = getXmlChild(node, localName);
-  if(!child){
-    child = doc.createElementNS(node.namespaceURI, localName);
-    node.appendChild(child);
+function findMonthClosingDayColumns(ws, monthInfo){
+  const cols = {};
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  for(let c = range.s.c; c <= range.e.c; c++){
+    const addr = XLSX.utils.encode_cell({r:12, c});
+    const cell = ws[addr];
+    const parsed = parseSheetDate(cell);
+    if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
+    if(parsed.month && parsed.month !== monthInfo.month) continue;
+    cols[parsed.day] = c;
   }
-  return child;
+  return cols;
 }
 
-function readSharedString(siNode){
-  const parts = [];
-  function walk(node){
-    for(const child of Array.from(node.childNodes || [])){
-      if(child.nodeType !== 1) continue;
-      if(child.localName === 't') parts.push(child.textContent || '');
-      else walk(child);
-    }
-  }
-  walk(siNode);
-  return parts.join('');
-}
-
-async function loadMonthClosingTemplateModel(buffer){
-  const zip = await JSZip.loadAsync(buffer.slice(0));
-  const sheetXmlText = await zip.file('xl/worksheets/sheet1.xml').async('string');
-  const sharedStringsFile = zip.file('xl/sharedStrings.xml');
-  const parser = new DOMParser();
-  const sheetDoc = parser.parseFromString(sheetXmlText, 'application/xml');
-  const worksheetNode = sheetDoc.getElementsByTagNameNS('*', 'worksheet')[0];
-  const sheetDataNode = sheetDoc.getElementsByTagNameNS('*', 'sheetData')[0];
-  const sharedStrings = [];
-  if(sharedStringsFile){
-    const sharedDoc = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
-    const sis = sharedDoc.getElementsByTagNameNS('*', 'si');
-    for(const si of Array.from(sis)) sharedStrings.push(readSharedString(si));
-  }
-
-  const rowMap = new Map();
-  const cellMap = new Map();
-  const rows = sheetDoc.getElementsByTagNameNS('*', 'row');
-  let maxRow = 1;
-  let maxColumn = 1;
-  for(const rowNode of Array.from(rows)){
-    const rowNumber = parseInt(rowNode.getAttribute('r') || '0', 10);
-    if(rowNumber) rowMap.set(rowNumber, rowNode);
-    maxRow = Math.max(maxRow, rowNumber || 1);
-    const cells = rowNode.getElementsByTagNameNS('*', 'c');
-    for(const cellNode of Array.from(cells)){
-      const ref = cellNode.getAttribute('r');
-      if(!ref) continue;
-      cellMap.set(ref, cellNode);
-      const decoded = decodeCellRef(ref);
-      if(decoded) maxColumn = Math.max(maxColumn, decoded.col);
-    }
-  }
-
-  const merges = [];
-  const mergeCells = sheetDoc.getElementsByTagNameNS('*', 'mergeCell');
-  for(const mergeNode of Array.from(mergeCells)){
-    const ref = mergeNode.getAttribute('ref');
-    const decoded = decodeRangeRef(ref);
-    if(decoded) merges.push(decoded);
-  }
-
-  const dimensionNode = sheetDoc.getElementsByTagNameNS('*', 'dimension')[0];
-  const dimRange = dimensionNode ? decodeRangeRef(dimensionNode.getAttribute('ref')) : null;
-  if(dimRange){
-    maxRow = Math.max(maxRow, dimRange.end.row);
-    maxColumn = Math.max(maxColumn, dimRange.end.col);
-  }
-
-  return {zip, sheetDoc, worksheetNode, sheetDataNode, sharedStrings, rowMap, cellMap, merges, maxRow, maxColumn};
-}
-
-function readTemplateCell(model, row, col){
-  const addr = excelAddr(row, col);
-  let cellNode = model.cellMap.get(addr) || null;
-  let sourceAddr = addr;
-  if(!cellNode){
-    for(const merge of model.merges){
-      if(
-        row >= merge.start.row && row <= merge.end.row &&
-        col >= merge.start.col && col <= merge.end.col
-      ){
-        sourceAddr = excelAddr(merge.start.row, merge.start.col);
-        cellNode = model.cellMap.get(sourceAddr) || null;
-        break;
-      }
-    }
-  }
-  return {addr, sourceAddr, cellNode};
-}
-
-function getTemplateCellComparableValue(model, cellNode){
-  if(!cellNode) return null;
-  const t = cellNode.getAttribute('t') || '';
-  const fNode = getXmlChild(cellNode, 'f');
-  const vNode = getXmlChild(cellNode, 'v');
-  const isNode = getXmlChild(cellNode, 'is');
-  if(t === 's' && vNode){
-    const idx = parseInt(vNode.textContent || '', 10);
-    return Number.isFinite(idx) ? (model.sharedStrings[idx] ?? '') : '';
-  }
-  if(isNode) return readSharedString(isNode);
-  if(vNode){
-    const raw = vNode.textContent || '';
-    if(fNode && raw !== '') return raw;
-    if(raw !== '' && /^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
-    return raw;
-  }
-  return null;
-}
-
-function getTemplateCellText(model, cellNode){
-  const raw = getTemplateCellComparableValue(model, cellNode);
-  return raw == null ? '' : String(raw).trim();
-}
-
-function compareCellRefs(a, b){
-  const da = decodeCellRef(a);
-  const db = decodeCellRef(b);
-  if(!da || !db) return String(a).localeCompare(String(b));
-  if(da.row !== db.row) return da.row - db.row;
-  return da.col - db.col;
-}
-
-function ensureTemplateRowNode(model, row){
-  let rowNode = model.rowMap.get(row) || null;
-  if(rowNode) return rowNode;
-  rowNode = model.sheetDoc.createElementNS(model.sheetDataNode.namespaceURI, 'row');
-  rowNode.setAttribute('r', String(row));
-  const existingRows = Array.from(model.sheetDataNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'row');
-  const nextRow = existingRows.find(node => parseInt(node.getAttribute('r') || '0', 10) > row);
-  if(nextRow) model.sheetDataNode.insertBefore(rowNode, nextRow);
-  else model.sheetDataNode.appendChild(rowNode);
-  model.rowMap.set(row, rowNode);
-  model.maxRow = Math.max(model.maxRow, row);
-  return rowNode;
-}
-
-function ensureTemplateCellNode(model, row, col){
-  const addr = excelAddr(row, col);
-  let cellNode = model.cellMap.get(addr) || null;
-  if(cellNode) return cellNode;
-  const rowNode = ensureTemplateRowNode(model, row);
-  cellNode = model.sheetDoc.createElementNS(rowNode.namespaceURI, 'c');
-  cellNode.setAttribute('r', addr);
-  const existingCells = Array.from(rowNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'c');
-  const nextCell = existingCells.find(node => compareCellRefs(node.getAttribute('r') || '', addr) > 0);
-  if(nextCell) rowNode.insertBefore(cellNode, nextCell);
-  else rowNode.appendChild(cellNode);
-  model.cellMap.set(addr, cellNode);
-  model.maxColumn = Math.max(model.maxColumn, col);
-  return cellNode;
-}
-
-function parseTemplateCellDate(model, cellNode){
-  if(!cellNode) return null;
-  const raw = getTemplateCellComparableValue(model, cellNode);
-  if(typeof raw === 'number'){
-    if(Number.isInteger(raw) && raw >= 1 && raw <= 31) return {day: raw};
-    const parsedSerial = parseExcelSerialDate(raw);
-    if(parsedSerial) return parsedSerial;
-  }
-  const texts = [raw == null ? '' : String(raw).trim()].filter(Boolean);
-  for(const text of texts){
-    let m = text.match(/^(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
-    if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
-    m = text.match(/^(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
-    if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
-    m = text.match(/^(\d{1,2})일$/);
-    if(m) return {day: parseInt(m[1], 10)};
-    m = text.match(/^(\d{1,2})$/);
-    if(m) return {day: parseInt(m[1], 10)};
-    m = text.match(/^(\d{1,2})\s*[일.\-/]?\s*[월화수목금토일]?(?:요일)?$/);
-    if(m) return {day: parseInt(m[1], 10)};
-    m = text.match(/^(\d{1,2})[\r\n\s]+[월화수목금토일]$/);
-    if(m) return {day: parseInt(m[1], 10)};
-    m = text.match(/(?:^|[\r\n\s])(\d{1,2})일?(?:$|[\r\n\s])/);
-    if(m) return {day: parseInt(m[1], 10)};
-  }
-  return null;
-}
-
-function findMonthClosingDayColumns(){
-  const startCol = colLabelToNumber('F');
-  const dayMap = new Map();
-  for(let day = 1; day <= 31; day++){
-    dayMap.set(day, startCol + (day - 1));
-  }
-  console.log(`[MonthClosing] day -> column (${dayMap.size}) ${Array.from(dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`).join(', ')}`);
-  console.log(
-    '[MonthClosing] 날짜 열 고정 매핑',
-    {
-      range: 'F~AJ',
-      days: Array.from(dayMap.entries()).map(([day, col])=>({day, col, colLabel: excelColLabel(col)}))
-    }
-  );
-  return {rowIndex: null, dayMap, debug: [], runLength: 31, orderedDays: [], inspectedRows: []};
-}
-
-function findMonthClosingBlocks(model, rosterList){
+function findMonthClosingBlocks(ws, rosterList){
   const idMap = new Map(rosterList.map(emp=>[normalizeEmpId(emp.empId), emp]));
   const nameMap = new Map(rosterList.map(emp=>[normalizeEmpName(emp.name), emp]));
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
   const blocks = [];
   const summaryRows = new Map();
-  for(let row = 1; row <= model.maxRow; row++){
-    const leftId = normalizeEmpId(getTemplateCellText(model, readTemplateCell(model, row, 2).cellNode));
-    const leftName = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, row, 3).cellNode));
-    const rightId = normalizeEmpId(getTemplateCellText(model, readTemplateCell(model, row, 52).cellNode));
-    const rightName = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, row, 53).cellNode));
-    const blockEmp = (leftId ? idMap.get(leftId) : null) || (!leftId && leftName ? nameMap.get(leftName) : null);
+  for(let row = range.s.r + 1; row <= range.e.r + 1; row++){
+    const leftId = normalizeEmpId(getWsText(ws, 'B' + row));
+    const leftName = normalizeEmpName(getWsText(ws, 'C' + row));
+    const rightId = normalizeEmpId(getWsText(ws, 'AZ' + row));
+    const rightName = normalizeEmpName(getWsText(ws, 'BA' + row));
+    const blockEmp = idMap.get(leftId) || nameMap.get(leftName);
     if(blockEmp){
       let inRow = null;
       let outRow = null;
-      for(let r = row; r <= Math.min(row + 6, model.maxRow); r++){
-        const label = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, r, 4).cellNode));
-        const sub = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, r, 5).cellNode));
+      for(let r = row; r <= Math.min(row + 6, range.e.r + 1); r++){
+        const label = normalizeEmpName(getWsText(ws, 'D' + r));
+        const sub = normalizeEmpName(getWsText(ws, 'E' + r));
         if(label === '교통비' && sub === '출근') inRow = r;
         if(label === '교통비' && sub === '퇴근') outRow = r;
       }
-      console.log('[MonthClosing] 직원 매핑', {
-        empName: blockEmp.name,
-        empId: blockEmp.empId,
-        startRow: row,
-        inRow,
-        outRow
-      });
       blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
     }
-    const summaryEmp = (rightId ? idMap.get(rightId) : null) || (!rightId && rightName ? nameMap.get(rightName) : null);
+    const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
     if(summaryEmp && !summaryRows.has(summaryEmp.empId)){
       summaryRows.set(summaryEmp.empId, row);
     }
@@ -2159,101 +1969,51 @@ function findMonthClosingBlocks(model, rosterList){
 }
 
 async function collectMonthClosingData(rosterList, monthInfo){
-  let receiptCount = 0;
-  let rawEmployeeSampleLogged = false;
-  let rawReceiptSampleCount = 0;
-  let aggregateSampleLogged = false;
   const entries = await Promise.all(rosterList.map(async emp=>{
-    const aggregateKey = getMonthClosingEmployeeKey(emp);
-    const rawRecords = await storeGet(empReceiptsKey(emp.empId), []);
-    const recs = extractReceiptArray(rawRecords);
-    if(!rawEmployeeSampleLogged && recs.length){
-      rawEmployeeSampleLogged = true;
-      console.log(`[MonthClosing] RAW_EMP_RECORD emp=${emp.name} empId=${emp.empId} data=${JSON.stringify(rawRecords).slice(0, 2000)}`);
-    }
+    const recs = await storeGet(empReceiptsKey(emp.empId), []);
     const days = {};
     let total = 0;
     for(const rec of (recs || [])){
-      if(rawReceiptSampleCount < 3){
-        rawReceiptSampleCount++;
-        console.log(`[MonthClosing] RAW_RECEIPT ${JSON.stringify(rec).slice(0, 1000)}`);
-      }
       const parsed = parseReceiptMonthDay(rec.wday);
       if(!parsed || parsed.month !== monthInfo.month) continue;
-      receiptCount++;
-      const amountInfo = getReceiptAmountInfo(rec);
-      if(!amountInfo.hasAmountField){
-        console.log(
-          `[MonthClosing] AMOUNT_FIELD_NOT_FOUND emp=${emp.name} empId=${emp.empId} keys=${Object.keys(rec || {}).join(',')} raw=${JSON.stringify(rec).slice(0, 1000)}`
-        );
-      }
-      console.log(
-        `[MonthClosing] receipt parsed emp=${emp.name} empId=${emp.empId} date=${rec.wday} dir=${rec.inout === '퇴근' ? '퇴근' : '출근'} field=${amountInfo.field || 'none'} rawAmount=${String(amountInfo.rawAmount)} parsedAmount=${amountInfo.parsedAmount}`
-      );
       const dayBucket = days[parsed.day] || {출근: 0, 퇴근: 0};
       const key = rec.inout === '퇴근' ? '퇴근' : '출근';
-      const amount = amountInfo.parsedAmount;
+      const amount = Number(rec.amount) || 0;
       dayBucket[key] += amount;
       days[parsed.day] = dayBucket;
       total += amount;
-      console.log(
-        `[MonthClosing] AGGREGATE emp=${emp.name} empId=${emp.empId} day=${parsed.day} direction=${key} amount=${amount} bucket=${JSON.stringify(dayBucket)}`
-      );
     }
-    if(!aggregateSampleLogged && Object.keys(days).length){
-      aggregateSampleLogged = true;
-      console.log(`[MonthClosing] AGGREGATE_SAMPLE emp=${emp.name} empId=${emp.empId} key=${aggregateKey} days=${JSON.stringify(days)}`);
-    }
-    return [aggregateKey, {emp, days, total}];
+    return [emp.empId, {emp, days, total}];
   }));
-  return {data: Object.fromEntries(entries), receiptCount};
+  return Object.fromEntries(entries);
 }
 
-function setTemplateNumericCellValue(model, row, col, value){
-  const read = readTemplateCell(model, row, col);
-  const cellNode = read.cellNode || ensureTemplateCellNode(model, row, col);
-  if(getXmlChild(cellNode, 'f')){
-    return {ok:false, reason:'formula-cell', cellRef: read.addr};
+function clearWorksheetCell(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return;
+  delete cell.v;
+  delete cell.w;
+  delete cell.f;
+  cell.t = 'z';
+}
+
+function setWorksheetNumber(ws, addr, value){
+  if(!value){
+    clearWorksheetCell(ws, addr);
+    return;
   }
-  cellNode.removeAttribute('t');
-  const isNode = getXmlChild(cellNode, 'is');
-  if(isNode) cellNode.removeChild(isNode);
-  if(value == null || value === 0){
-    const vNode = getXmlChild(cellNode, 'v');
-    if(vNode) cellNode.removeChild(vNode);
-    return {ok:false, reason:'empty-or-zero', cellRef: read.addr};
-  }
-  const vNode = getOrCreateXmlChild(model.sheetDoc, cellNode, 'v');
-  vNode.textContent = String(value);
-  return {ok:true, reason:'written', cellRef: read.addr};
-}
-
-function verifyTemplateNumericCellValue(model, row, col, expected){
-  const read = readTemplateCell(model, row, col);
-  const foundValue = getTemplateCellComparableValue(model, read.cellNode);
-  const found = Number(foundValue) === Number(expected);
-  console.log(
-    `[MonthClosing] XMLVERIFY cell=${excelAddr(row, col)} row=${row} col=${excelColLabel(col)} expected=${expected} found=${found} actual=${foundValue}`
-  );
-  return found;
-}
-
-async function serializeMonthClosingWorkbook(model){
-  const serializer = new XMLSerializer();
-  const xml = serializer.serializeToString(model.sheetDoc);
-  model.zip.file('xl/worksheets/sheet1.xml', xml);
-  return model.zip.generateAsync({
-    type:'blob',
-    mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    compression:'DEFLATE',
-    compressionOptions:{level:6}
-  });
+  const cell = ws[addr] || {};
+  cell.t = 'n';
+  cell.v = value;
+  delete cell.w;
+  delete cell.f;
+  ws[addr] = cell;
 }
 
 async function previewAdminMonthClosingTemplate(){
   const monthInfo = getMonthInfo();
   if(!monthInfo && !monthClosingTemplateBuffer){
-    setAdminMonthClosingStatus('월과 양식을 선택하면 매핑 준비 상태를 여기에서 안내합니다.');
+    setAdminMonthClosingStatus('월과 양식을 선택하면 자동 매핑 준비 상태를 여기에서 안내합니다.');
     return;
   }
   if(!monthInfo){
@@ -2265,13 +2025,14 @@ async function previewAdminMonthClosingTemplate(){
     return;
   }
   try{
-    const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
-    const {blocks, summaryRows} = findMonthClosingBlocks(model, roster);
-    const dayScan = findMonthClosingDayColumns();
+    const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
     const monthLabel = monthInfo.raw.replace('-', '.');
     setAdminMonthClosingStatus(
-      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 고정 매핑되었습니다. 대상 월: ${monthLabel}`,
-      (blocks.length && dayScan.dayMap.size) ? 'good' : 'warn'
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 감지되었습니다. 대상 월: ${monthLabel}`,
+      (blocks.length && Object.keys(dayColumns).length) ? 'good' : 'warn'
     );
   }catch(e){
     setAdminMonthClosingStatus('양식 분석 중 오류가 발생했습니다: ' + e.message, 'bad');
@@ -2296,142 +2057,64 @@ async function adminDownloadMonthClosing(){
     btn.innerHTML = '<i class="ti ti-loader" style="animation:spin .8s linear infinite;font-size:15px"></i> 월마감 생성 중..';
   }
 
-  let summary = {
-    receiptCount: 0,
-    mappedEmployeeCount: 0,
-    dayColumnCount: 0,
-    writeAttempts: 0,
-    writeSuccesses: 0,
-    skippedReasons: {}
-  };
-
   try{
-    console.log('[MonthClosing] 시작', {month: monthInfo.raw, templateName: monthClosingTemplateName});
     roster = await ensureRoster();
-    console.log('[MonthClosing] 양식 로드 완료');
-    const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
-    const {blocks} = findMonthClosingBlocks(model, roster);
-    console.log('[MonthClosing] 직원 매핑 완료', {blockCount: blocks.length});
-    const dayScan = findMonthClosingDayColumns();
-    console.log('[MonthClosing] 날짜 매핑 완료', {dayColumnCount: dayScan.dayMap.size});
-    const dayEntries = Array.from(dayScan.dayMap.entries());
+    const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const dayEntries = Object.entries(dayColumns);
     if(!blocks.length){
       throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
     }
     if(!dayEntries.length){
-      throw new Error('고정 날짜 열 매핑(F~AJ = 1일~31일)을 생성하지 못했습니다.');
+      throw new Error('양식에서 날짜 칸을 찾지 못했습니다. 월 선택값과 양식의 날짜 행이 맞는지 확인해 주세요.');
     }
 
-    console.log('[MonthClosing] Firebase 영수증 조회 시작');
-    const {data: monthlyData, receiptCount} = await collectMonthClosingData(roster, monthInfo);
-    console.log('[MonthClosing] Firebase 영수증 조회 완료');
-    console.log('[MonthClosing] 월 필터 후 receiptCount', receiptCount);
-    summary.receiptCount = receiptCount;
-    summary.dayColumnCount = dayEntries.length;
+    const monthlyData = await collectMonthClosingData(roster, monthInfo);
     let filledEmployees = 0;
-    if(receiptCount === 0){
-      const sample = [];
-      for(const emp of roster.slice(0, 3)){
-        const recs = await storeGet(empReceiptsKey(emp.empId), []);
-        sample.push({empName: emp.name, empId: emp.empId, receipts: (recs || []).slice(0, 3)});
-      }
-      console.log('[MonthClosing] receiptCount=0 raw receipts sample', sample);
-    }
+    let mappedSummaries = 0;
 
-    console.log('[MonthClosing] write loop 진입');
     for(const block of blocks){
       if(!block.inRow && !block.outRow) continue;
-      summary.mappedEmployeeCount++;
-      const readKey = getMonthClosingEmployeeKey(block.emp);
-      const empData = monthlyData[readKey] || {days:{}, total:0};
-      console.log(`[MonthClosing] EMPDATA_LOOKUP emp=${block.emp.name} empId=${block.emp.empId} key=${readKey} found=${!!monthlyData[readKey]}`);
+      const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
       if(empData.total > 0) filledEmployees++;
       for(const [, colIndex] of dayEntries){
-        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex, null);
-        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex, null);
+        if(block.inRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}));
+        if(block.outRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}));
       }
-      for(const [dayKey, dayData] of Object.entries(empData.days || {})){
+      for(const [dayKey, colIndex] of dayEntries){
         const day = parseInt(dayKey, 10);
-        const colIndex = dayScan.dayMap.get(day);
-        if(!colIndex){
-          summary.skippedReasons['missing-day-column'] = (summary.skippedReasons['missing-day-column'] || 0) + 1;
-          console.log(
-            `[MonthClosing] SKIP reason=missing-day-column emp=${block.emp.name} empId=${block.emp.empId} day=${dayKey} allDays=${JSON.stringify(empData.days).slice(0, 1000)}`
-          );
-          continue;
-        }
-        console.log(
-          `[MonthClosing] AGGREGATE_READ emp=${block.emp.name} empId=${block.emp.empId} day=${day} raw=${JSON.stringify(dayData)} allDays=${JSON.stringify(empData.days).slice(0, 1000)}`
-        );
-        if(block.inRow){
-          summary.writeAttempts++;
-          const targetCellRef = excelAddr(block.inRow, colIndex);
-          const targetAmount = dayData['출근'] || 0;
-          console.log(
-            `[MonthClosing] WRITE emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-          );
-          const result = setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
-          if(result.ok){
-            summary.writeSuccesses++;
-            console.log(
-              `[MonthClosing] WRITE_OK emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-            );
-            verifyTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
-          }else{
-            summary.skippedReasons[result.reason] = (summary.skippedReasons[result.reason] || 0) + 1;
-            console.log(
-              `[MonthClosing] SKIP reason=${result.reason} emp=${block.emp.name} day=${day} dir=출근 cell=${targetCellRef} row=${block.inRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-            );
-          }
-        }
-        if(block.outRow){
-          summary.writeAttempts++;
-          const targetCellRef = excelAddr(block.outRow, colIndex);
-          const targetAmount = dayData['퇴근'] || 0;
-          console.log(
-            `[MonthClosing] WRITE emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-          );
-          const result = setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
-          if(result.ok){
-            summary.writeSuccesses++;
-            console.log(
-              `[MonthClosing] WRITE_OK emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-            );
-            verifyTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
-          }else{
-            summary.skippedReasons[result.reason] = (summary.skippedReasons[result.reason] || 0) + 1;
-            console.log(
-              `[MonthClosing] SKIP reason=${result.reason} emp=${block.emp.name} day=${day} dir=퇴근 cell=${targetCellRef} row=${block.outRow} col=${excelColLabel(colIndex)} amount=${targetAmount}`
-            );
-          }
-        }
+        const dayData = empData.days[day] || {};
+        if(block.inRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}), dayData['출근'] || 0);
+        if(block.outRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}), dayData['퇴근'] || 0);
       }
     }
-    console.log('[MonthClosing] write loop 종료');
 
-    console.log('[MonthClosing] 다운로드 직전');
-    const out = await serializeMonthClosingWorkbook(model);
+    for(const [empId, row] of summaryRows.entries()){
+      const empData = monthlyData[empId] || {total:0};
+      setWorksheetNumber(ws, 'BB' + row, empData.total || 0);
+      mappedSummaries++;
+    }
+
+    const out = XLSX.write(workbook, {bookType:'xlsx', type:'array', cellStyles:true, bookSST:true});
     const monthTag = monthInfo.raw;
     const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
     saveAs(
-      out,
+      new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
       `${baseName}_${monthTag}_월마감완성.xlsx`
     );
-    console.log('[MonthClosing] 다운로드 완료');
 
     setAdminMonthClosingStatus(
-      `완료되었습니다. 직원 블록 ${blocks.length}개에 대해 F~AJ 날짜 칸에만 교통비 금액을 반영했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
+      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했고, 요약 교통비 ${mappedSummaries}행을 갱신했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
       'good'
     );
     toast('월마감 엑셀 다운로드 완료');
   }catch(e){
-    console.error('[MonthClosing] 오류', e, e && e.stack ? e.stack : '');
+    console.error(e);
     setAdminMonthClosingStatus('월마감 생성 중 오류가 발생했습니다: ' + e.message, 'bad');
     alert('월마감 생성 중 오류가 발생했습니다.\n' + e.message);
   }finally{
-    console.log(
-      `[MonthClosing] summary receipt=${summary.receiptCount} mapped=${summary.mappedEmployeeCount} dayCols=${summary.dayColumnCount} attempts=${summary.writeAttempts} success=${summary.writeSuccesses} skipped=${JSON.stringify(summary.skippedReasons)}`
-    );
     if(btn){
       btn.disabled = false;
       btn.innerHTML = originalHtml;
