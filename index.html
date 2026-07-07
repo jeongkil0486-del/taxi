@@ -1670,6 +1670,7 @@ async function downloadXlsx(){
 
     // 이미지 삽입
     const hasImg=sel.some(r=>r.img);
+    let skippedImageCount = 0;
     if(hasImg){
       let drawXml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
         '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '+
@@ -1682,47 +1683,54 @@ async function downloadXlsx(){
         if(!sel[i].img) continue;
         imgIdx++;
         const rId=`rId${imgIdx}`, fname=`image${imgIdx}.jpeg`;
-        const {w,h}=slotPx(SLOTS[i]);
-        const resized=await resizeImg(sel[i].img,w,h);
-        zip.file(`xl/media/${fname}`,b64ToBytes(resized.split(',')[1]));
-        const {w:cx,h:cy}=slotEmu(SLOTS[i]);
-        drawRels+=`<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${fname}"/>\n`;
-        drawXml+=`<xdr:twoCellAnchor editAs="oneCell">\n`+
-          `  <xdr:from><xdr:col>${SLOTS[i].fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\n`+
-          `  <xdr:to><xdr:col>${SLOTS[i].tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\n`+
-          `  <xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${1000+imgIdx}" name="Photo${imgIdx}" descr=""/>`+
-          `<xdr:cNvPicPr preferRelativeResize="0"><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>\n`+
-          `    <xdr:blipFill><a:blip r:embed="${rId}" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>\n`+
-          `    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>`+
-          `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr></xdr:pic>\n`+
-          `  <xdr:clientData/>\n</xdr:twoCellAnchor>\n`;
+        try{
+          const {w,h}=slotPx(SLOTS[i]);
+          const resized=await resizeImg(sel[i].img,w,h);
+          zip.file(`xl/media/${fname}`,b64ToBytes(resized.split(',')[1]));
+          const {w:cx,h:cy}=slotEmu(SLOTS[i]);
+          drawRels+=`<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${fname}"/>\n`;
+          drawXml+=`<xdr:twoCellAnchor editAs="oneCell">\n`+
+            `  <xdr:from><xdr:col>${SLOTS[i].fc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].fr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>\n`+
+            `  <xdr:to><xdr:col>${SLOTS[i].tc}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${SLOTS[i].tr}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>\n`+
+            `  <xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${1000+imgIdx}" name="Photo${imgIdx}" descr=""/>`+
+            `<xdr:cNvPicPr preferRelativeResize="0"><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>\n`+
+            `    <xdr:blipFill><a:blip r:embed="${rId}" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>\n`+
+            `    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>`+
+            `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr></xdr:pic>\n`+
+            `  <xdr:clientData/>\n</xdr:twoCellAnchor>\n`;
+        }catch(err){
+          skippedImageCount++;
+          console.error('[StaffDownload] 이미지 삽입 실패', sel[i].img, err);
+        }
         pf.style.width=(40+imgIdx*7)+'%';
       }
-      drawXml+='</xdr:wsDr>'; drawRels+='</Relationships>';
-      zip.file('xl/drawings/drawing1.xml',drawXml);
-      zip.file('xl/drawings/_rels/drawing1.xml.rels',drawRels);
-      if(!sheetXml.includes('<drawing')){
-        sheetXml=sheetXml.replace('</worksheet>','<drawing r:id="rIdDrw1"/></worksheet>');
-        zip.file('xl/worksheets/sheet1.xml',sheetXml);
+      if(drawXml.includes('<xdr:twoCellAnchor')){
+        drawXml+='</xdr:wsDr>'; drawRels+='</Relationships>';
+        zip.file('xl/drawings/drawing1.xml',drawXml);
+        zip.file('xl/drawings/_rels/drawing1.xml.rels',drawRels);
+        if(!sheetXml.includes('<drawing')){
+          sheetXml=sheetXml.replace('</worksheet>','<drawing r:id="rIdDrw1"/></worksheet>');
+          zip.file('xl/worksheets/sheet1.xml',sheetXml);
+        }
+        if(!relsXml.includes('drawing1.xml')){
+          relsXml=relsXml.replace('</Relationships>',
+            '<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>\n</Relationships>');
+          zip.file('xl/worksheets/_rels/sheet1.xml.rels',relsXml);
+        }
+        if(!ctXml.includes('"image/jpeg"'))
+          ctXml=ctXml.replace('</Types>','<Default Extension="jpeg" ContentType="image/jpeg"/>\n<Default Extension="jpg" ContentType="image/jpeg"/>\n</Types>');
+        if(!ctXml.includes('drawing1.xml'))
+          ctXml=ctXml.replace('</Types>',
+            '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>\n</Types>');
+        zip.file('[Content_Types].xml',ctXml);
       }
-      if(!relsXml.includes('drawing1.xml')){
-        relsXml=relsXml.replace('</Relationships>',
-          '<Relationship Id="rIdDrw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>\n</Relationships>');
-        zip.file('xl/worksheets/_rels/sheet1.xml.rels',relsXml);
-      }
-      if(!ctXml.includes('"image/jpeg"'))
-        ctXml=ctXml.replace('</Types>','<Default Extension="jpeg" ContentType="image/jpeg"/>\n<Default Extension="jpg" ContentType="image/jpeg"/>\n</Types>');
-      if(!ctXml.includes('drawing1.xml'))
-        ctXml=ctXml.replace('</Types>',
-          '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>\n</Types>');
-      zip.file('[Content_Types].xml',ctXml);
     }
 
     pf.style.width='92%';
     const blob=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',compression:'DEFLATE',compressionOptions:{level:6}});
     saveAs(blob,'교통비영수증_'+session.name+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
     pf.style.width='100%';
-    toast('다운로드 완료!');
+    toast(skippedImageCount ? `다운로드 완료! (이미지 ${skippedImageCount}건 제외)` : '다운로드 완료!');
     setTimeout(()=>{pw.style.display='none';pf.style.width='0%';},1500);
 
     // 관리자 추적용 다운로드 기록 저장 (영수증/내역은 삭제하지 않고 그대로 유지)
