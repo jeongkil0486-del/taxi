@@ -2307,7 +2307,7 @@ async function adminDownloadMonthClosing(){
     );
     toast('월마감 엑셀 다운로드 완료');
   }catch(e){
-    console.error(e);
+    console.error('[MonthClosing] 오류', e);
     setAdminMonthClosingStatus('월마감 생성 중 오류가 발생했습니다: ' + e.message, 'bad');
     alert('월마감 생성 중 오류가 발생했습니다.\n' + e.message);
   }finally{
