@@ -2125,6 +2125,7 @@ function findMonthClosingBlocks(model, rosterList){
 }
 
 async function collectMonthClosingData(rosterList, monthInfo){
+  let receiptCount = 0;
   const entries = await Promise.all(rosterList.map(async emp=>{
     const recs = await storeGet(empReceiptsKey(emp.empId), []);
     const days = {};
@@ -2132,6 +2133,7 @@ async function collectMonthClosingData(rosterList, monthInfo){
     for(const rec of (recs || [])){
       const parsed = parseReceiptMonthDay(rec.wday);
       if(!parsed || parsed.month !== monthInfo.month) continue;
+      receiptCount++;
       console.log('[MonthClosing] 월별 영수증 집계', {
         empName: emp.name,
         empId: emp.empId,
@@ -2148,15 +2150,14 @@ async function collectMonthClosingData(rosterList, monthInfo){
     }
     return [emp.empId, {emp, days, total}];
   }));
-  return Object.fromEntries(entries);
+  return {data: Object.fromEntries(entries), receiptCount};
 }
 
 function setTemplateNumericCellValue(model, row, col, value){
   const read = readTemplateCell(model, row, col);
   const cellNode = read.cellNode || ensureTemplateCellNode(model, row, col);
   if(getXmlChild(cellNode, 'f')){
-    console.log('[MonthClosing] 수식 셀은 건드리지 않습니다:', read.addr);
-    return;
+    return {ok:false, reason:'formula-cell', cellRef: read.addr};
   }
   cellNode.removeAttribute('t');
   const isNode = getXmlChild(cellNode, 'is');
@@ -2164,10 +2165,24 @@ function setTemplateNumericCellValue(model, row, col, value){
   if(value == null || value === 0){
     const vNode = getXmlChild(cellNode, 'v');
     if(vNode) cellNode.removeChild(vNode);
-    return;
+    return {ok:false, reason:'empty-or-zero', cellRef: read.addr};
   }
   const vNode = getOrCreateXmlChild(model.sheetDoc, cellNode, 'v');
   vNode.textContent = String(value);
+  return {ok:true, reason:'written', cellRef: read.addr};
+}
+
+function verifyTemplateNumericCellValue(model, row, col, expected){
+  const read = readTemplateCell(model, row, col);
+  const foundValue = getTemplateCellComparableValue(model, read.cellNode);
+  const found = Number(foundValue) === Number(expected);
+  console.log('[MonthClosing] XML 검증', {
+    cellRef: excelAddr(row, col),
+    expected,
+    found,
+    actual: foundValue
+  });
+  return found;
 }
 
 async function serializeMonthClosingWorkbook(model){
@@ -2241,11 +2256,16 @@ async function adminDownloadMonthClosing(){
       throw new Error('양식에서 날짜 칸을 찾지 못했습니다. 월 선택값과 양식의 날짜 행이 맞는지 확인해 주세요.');
     }
 
-    const monthlyData = await collectMonthClosingData(roster, monthInfo);
+    const {data: monthlyData, receiptCount} = await collectMonthClosingData(roster, monthInfo);
     let filledEmployees = 0;
+    let mappedEmployeeCount = 0;
+    let writeAttempts = 0;
+    let writeSuccesses = 0;
+    const skippedReasons = {};
 
     for(const block of blocks){
       if(!block.inRow && !block.outRow) continue;
+      mappedEmployeeCount++;
       const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
       if(empData.total > 0) filledEmployees++;
       for(const [, colIndex] of dayEntries){
@@ -2255,27 +2275,70 @@ async function adminDownloadMonthClosing(){
       for(const [day, colIndex] of dayEntries){
         const dayData = empData.days[day] || {};
         if(block.inRow){
-          console.log('[MonthClosing] 셀 쓰기', {
+          writeAttempts++;
+          const targetInfo = {
             cellRef: excelAddr(block.inRow, colIndex),
             amount: dayData['출근'] || 0,
             empName: block.emp.name,
             day,
             direction: '출근'
-          });
-          setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
+          };
+          console.log('[MonthClosing] 셀 쓰기', targetInfo);
+          const result = setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
+          if(result.ok){
+            writeSuccesses++;
+            console.log('[MonthClosing] 셀 쓰기 성공', targetInfo);
+            verifyTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
+          }else{
+            skippedReasons[result.reason] = (skippedReasons[result.reason] || 0) + 1;
+            console.log('[MonthClosing] 셀 쓰기 스킵', {
+              reason: result.reason,
+              empName: block.emp.name,
+              day,
+              direction: '출근',
+              targetRow: block.inRow,
+              targetCol: colIndex
+            });
+          }
         }
         if(block.outRow){
-          console.log('[MonthClosing] 셀 쓰기', {
+          writeAttempts++;
+          const targetInfo = {
             cellRef: excelAddr(block.outRow, colIndex),
             amount: dayData['퇴근'] || 0,
             empName: block.emp.name,
             day,
             direction: '퇴근'
-          });
-          setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
+          };
+          console.log('[MonthClosing] 셀 쓰기', targetInfo);
+          const result = setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
+          if(result.ok){
+            writeSuccesses++;
+            console.log('[MonthClosing] 셀 쓰기 성공', targetInfo);
+            verifyTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
+          }else{
+            skippedReasons[result.reason] = (skippedReasons[result.reason] || 0) + 1;
+            console.log('[MonthClosing] 셀 쓰기 스킵', {
+              reason: result.reason,
+              empName: block.emp.name,
+              day,
+              direction: '퇴근',
+              targetRow: block.outRow,
+              targetCol: colIndex
+            });
+          }
         }
       }
     }
+
+    console.log('[MonthClosing] summary', {
+      receiptCount,
+      mappedEmployeeCount,
+      dayColumnCount: dayEntries.length,
+      writeAttempts,
+      writeSuccesses,
+      skippedReasons
+    });
 
     const out = await serializeMonthClosingWorkbook(model);
     const monthTag = monthInfo.raw;
