@@ -2182,6 +2182,7 @@ async function collectMonthClosingData(rosterList, monthInfo){
   let receiptCount = 0;
   let rawEmployeeSampleLogged = false;
   let rawReceiptSampleCount = 0;
+  let aggregateSampleLogged = false;
   const entries = await Promise.all(rosterList.map(async emp=>{
     const rawRecords = await storeGet(empReceiptsKey(emp.empId), []);
     const recs = extractReceiptArray(rawRecords);
@@ -2214,6 +2215,13 @@ async function collectMonthClosingData(rosterList, monthInfo){
       dayBucket[key] += amount;
       days[parsed.day] = dayBucket;
       total += amount;
+      console.log(
+        `[MonthClosing] AGGREGATE emp=${emp.name} empId=${emp.empId} day=${parsed.day} direction=${key} amount=${amount} bucket=${JSON.stringify(dayBucket)}`
+      );
+    }
+    if(!aggregateSampleLogged && Object.keys(days).length){
+      aggregateSampleLogged = true;
+      console.log(`[MonthClosing] AGGREGATE_SAMPLE emp=${emp.name} empId=${emp.empId} days=${JSON.stringify(days)}`);
     }
     return [emp.empId, {emp, days, total}];
   }));
@@ -2361,6 +2369,9 @@ async function adminDownloadMonthClosing(){
       }
       for(const [day, colIndex] of dayEntries){
         const dayData = empData.days[day] || {};
+        console.log(
+          `[MonthClosing] AGGREGATE_READ emp=${block.emp.name} empId=${block.emp.empId} day=${day} raw=${JSON.stringify(dayData)} allDays=${JSON.stringify(empData.days).slice(0, 1000)}`
+        );
         if(block.inRow){
           summary.writeAttempts++;
           const targetCellRef = excelAddr(block.inRow, colIndex);
