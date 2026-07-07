@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.8.0/dist/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <style>
@@ -331,6 +332,18 @@ button,input,select{font-family:inherit}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow-card)}
 .kpi .k-lbl{font-size:11.5px;color:var(--ink-faint);font-weight:700;margin-bottom:6px}
 .kpi .k-val{font-size:22px;font-weight:800;color:var(--ink);letter-spacing:-.01em}
+.admin-stack{display:grid;gap:22px}
+.admin-month-card .field{margin-bottom:12px}
+.admin-month-card .field label{text-align:left}
+.admin-month-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:8px}
+.admin-month-actions .btn{flex:1 1 220px}
+.admin-status{
+  margin-top:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--line);
+  background:var(--paper);font-size:12.5px;line-height:1.7;color:var(--ink-soft);font-weight:600;
+}
+.admin-status.good{background:var(--good-tint);border-color:#CBEFD9;color:#176D44}
+.admin-status.bad{background:var(--bad-tint);border-color:#F3CFCC;color:#A53630}
+.admin-status.warn{background:var(--gold-tint);border-color:#F0DDB4;color:#8A6420}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:760px){
@@ -539,9 +552,27 @@ button,input,select{font-family:inherit}
         </table>
       </div>
     </div>
+    <div class="card admin-month-card">
+      <div class="card-title"><i class="ti ti-file-spreadsheet"></i>월마감 다운로드</div>
+      <div class="card-sub">월마감 양식을 업로드하면 직원 이름/사번과 날짜 칸을 자동 인식해 저장된 교통비를 채운 엑셀을 다운로드합니다.</div>
+      <div class="field">
+        <label for="adminMonthClosingMonth">대상 월</label>
+        <input type="month" id="adminMonthClosingMonth">
+      </div>
+      <div class="field">
+        <label for="adminMonthClosingFile">월마감 양식 (.xlsx)</label>
+        <input type="file" id="adminMonthClosingFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+      </div>
+      <div class="admin-month-actions">
+        <button class="btn" type="button" onclick="document.getElementById('adminMonthClosingFile').click()"><i class="ti ti-upload"></i>양식 업로드</button>
+        <button class="btn primary" type="button" id="adminMonthClosingBtn" onclick="adminDownloadMonthClosing()"><i class="ti ti-download"></i>월마감 엑셀 다운로드</button>
+      </div>
+      <div id="adminMonthClosingStatus" class="admin-status">월과 양식을 선택하면 자동 매핑 준비 상태를 여기에서 안내합니다.</div>
+    </div>
   </div>
 
   <!-- ══════════════ 직원 화면 ══════════════ -->
+
   <div id="staffView" style="display:none">
     <div class="tab-row">
       <button class="tab active" onclick="showTab('upload')" id="tab-upload"><i class="ti ti-camera"></i>촬영/업로드</button>
@@ -831,6 +862,8 @@ let pendingImgs = [];
 let viewYear = new Date().getFullYear();
 let viewMonth = new Date().getMonth()+1;
 let selectedIds = new Set();
+let monthClosingTemplateBuffer = null;
+let monthClosingTemplateName = '';
 
 // ════════════════════════════════════════════════════════════
 // 로그인 화면 탭 전환
@@ -956,6 +989,7 @@ async function enterAdminView(){
   pill.className = 'role-pill admin';
 
   await renderAdminRoster();
+  initAdminMonthClosing();
 }
 
 async function adminSaveMaxAmount(){
@@ -1712,6 +1746,297 @@ async function downloadXlsx(){
 // ════════════════════════════════════════════════════════════
 // 기타 UI 유틸
 // ════════════════════════════════════════════════════════════
+function initAdminMonthClosing(){
+  const monthInput = document.getElementById('adminMonthClosingMonth');
+  const fileInput = document.getElementById('adminMonthClosingFile');
+  if(!monthInput || !fileInput) return;
+  if(!monthInput.value) monthInput.value = curMonthKey();
+  if(fileInput.dataset.bound === '1') return;
+  fileInput.dataset.bound = '1';
+  monthInput.addEventListener('change', ()=>{ previewAdminMonthClosingTemplate(); });
+  fileInput.addEventListener('change', async e=>{
+    const file = e.target.files && e.target.files[0];
+    if(!file){
+      monthClosingTemplateBuffer = null;
+      monthClosingTemplateName = '';
+      previewAdminMonthClosingTemplate();
+      return;
+    }
+    const isXlsx = /\.xlsx$/i.test(file.name);
+    if(!isXlsx){
+      monthClosingTemplateBuffer = null;
+      monthClosingTemplateName = '';
+      fileInput.value = '';
+      setAdminMonthClosingStatus('월마감 양식은 .xlsx 파일만 업로드할 수 있습니다.', 'bad');
+      return;
+    }
+    monthClosingTemplateBuffer = await file.arrayBuffer();
+    monthClosingTemplateName = file.name;
+    await previewAdminMonthClosingTemplate();
+  });
+  previewAdminMonthClosingTemplate();
+}
+
+function setAdminMonthClosingStatus(msg, tone){
+  const el = document.getElementById('adminMonthClosingStatus');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'admin-status' + (tone ? ' ' + tone : '');
+}
+
+function normalizeEmpName(v){
+  return String(v || '').replace(/\s+/g, '').trim();
+}
+
+function normalizeEmpId(v){
+  return String(v || '').replace(/\s+/g, '').replace(/-/g, '').trim().toUpperCase();
+}
+
+function parseReceiptMonthDay(wday){
+  const m = String(wday || '').trim().match(/^(\d{2})\/(\d{2})$/);
+  if(!m) return null;
+  return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+}
+
+function getWsText(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return '';
+  if(cell.w != null && cell.w !== '') return String(cell.w).trim();
+  if(cell.v instanceof Date){
+    const mm = String(cell.v.getMonth() + 1).padStart(2, '0');
+    const dd = String(cell.v.getDate()).padStart(2, '0');
+    return mm + '/' + dd;
+  }
+  return String(cell.v == null ? '' : cell.v).trim();
+}
+
+function parseSheetDate(cell){
+  if(!cell) return null;
+  if(cell.v instanceof Date){
+    return {year: cell.v.getFullYear(), month: cell.v.getMonth() + 1, day: cell.v.getDate()};
+  }
+  if(typeof cell.v === 'number' && XLSX && XLSX.SSF){
+    const parsed = XLSX.SSF.parse_date_code(cell.v);
+    if(parsed && parsed.y && parsed.m && parsed.d){
+      return {year: parsed.y, month: parsed.m, day: parsed.d};
+    }
+  }
+  const text = String(cell.w || cell.v || '').trim();
+  let m = text.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
+  m = text.match(/^(\d{1,2})[.\-/](\d{1,2})$/);
+  if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+  m = text.match(/^(\d{1,2})$/);
+  if(m) return {day: parseInt(m[1], 10)};
+  return null;
+}
+
+function getMonthInfo(){
+  const raw = (document.getElementById('adminMonthClosingMonth') || {}).value || '';
+  const m = raw.match(/^(\d{4})-(\d{2})$/);
+  if(!m) return null;
+  return {raw, year: parseInt(m[1], 10), month: parseInt(m[2], 10)};
+}
+
+function findMonthClosingDayColumns(ws, monthInfo){
+  const cols = {};
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  for(let c = range.s.c; c <= range.e.c; c++){
+    const addr = XLSX.utils.encode_cell({r:12, c});
+    const cell = ws[addr];
+    const parsed = parseSheetDate(cell);
+    if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
+    if(parsed.month && parsed.month !== monthInfo.month) continue;
+    cols[parsed.day] = c;
+  }
+  return cols;
+}
+
+function findMonthClosingBlocks(ws, rosterList){
+  const idMap = new Map(rosterList.map(emp=>[normalizeEmpId(emp.empId), emp]));
+  const nameMap = new Map(rosterList.map(emp=>[normalizeEmpName(emp.name), emp]));
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const blocks = [];
+  const summaryRows = new Map();
+  for(let row = range.s.r + 1; row <= range.e.r + 1; row++){
+    const leftId = normalizeEmpId(getWsText(ws, 'B' + row));
+    const leftName = normalizeEmpName(getWsText(ws, 'C' + row));
+    const rightId = normalizeEmpId(getWsText(ws, 'AZ' + row));
+    const rightName = normalizeEmpName(getWsText(ws, 'BA' + row));
+    const blockEmp = idMap.get(leftId) || nameMap.get(leftName);
+    if(blockEmp){
+      let inRow = null;
+      let outRow = null;
+      for(let r = row; r <= Math.min(row + 6, range.e.r + 1); r++){
+        const label = normalizeEmpName(getWsText(ws, 'D' + r));
+        const sub = normalizeEmpName(getWsText(ws, 'E' + r));
+        if(label === '교통비' && sub === '출근') inRow = r;
+        if(label === '교통비' && sub === '퇴근') outRow = r;
+      }
+      blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
+    }
+    const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
+    if(summaryEmp && !summaryRows.has(summaryEmp.empId)){
+      summaryRows.set(summaryEmp.empId, row);
+    }
+  }
+  return {blocks, summaryRows};
+}
+
+async function collectMonthClosingData(rosterList, monthInfo){
+  const entries = await Promise.all(rosterList.map(async emp=>{
+    const recs = await storeGet(empReceiptsKey(emp.empId), []);
+    const days = {};
+    let total = 0;
+    for(const rec of (recs || [])){
+      const parsed = parseReceiptMonthDay(rec.wday);
+      if(!parsed || parsed.month !== monthInfo.month) continue;
+      const dayBucket = days[parsed.day] || {출근: 0, 퇴근: 0};
+      const key = rec.inout === '퇴근' ? '퇴근' : '출근';
+      const amount = Number(rec.amount) || 0;
+      dayBucket[key] += amount;
+      days[parsed.day] = dayBucket;
+      total += amount;
+    }
+    return [emp.empId, {emp, days, total}];
+  }));
+  return Object.fromEntries(entries);
+}
+
+function clearWorksheetCell(ws, addr){
+  const cell = ws[addr];
+  if(!cell) return;
+  delete cell.v;
+  delete cell.w;
+  delete cell.f;
+  cell.t = 'z';
+}
+
+function setWorksheetNumber(ws, addr, value){
+  if(!value){
+    clearWorksheetCell(ws, addr);
+    return;
+  }
+  const cell = ws[addr] || {};
+  cell.t = 'n';
+  cell.v = value;
+  delete cell.w;
+  delete cell.f;
+  ws[addr] = cell;
+}
+
+async function previewAdminMonthClosingTemplate(){
+  const monthInfo = getMonthInfo();
+  if(!monthInfo && !monthClosingTemplateBuffer){
+    setAdminMonthClosingStatus('월과 양식을 선택하면 자동 매핑 준비 상태를 여기에서 안내합니다.');
+    return;
+  }
+  if(!monthInfo){
+    setAdminMonthClosingStatus('먼저 대상 월을 선택해 주세요.', 'warn');
+    return;
+  }
+  if(!monthClosingTemplateBuffer){
+    setAdminMonthClosingStatus('월은 선택되었습니다. 이제 월마감 양식 .xlsx 파일을 업로드해 주세요.', 'warn');
+    return;
+  }
+  try{
+    const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const monthLabel = monthInfo.raw.replace('-', '.');
+    setAdminMonthClosingStatus(
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 감지되었습니다. 대상 월: ${monthLabel}`,
+      (blocks.length && Object.keys(dayColumns).length) ? 'good' : 'warn'
+    );
+  }catch(e){
+    setAdminMonthClosingStatus('양식 분석 중 오류가 발생했습니다: ' + e.message, 'bad');
+  }
+}
+
+async function adminDownloadMonthClosing(){
+  const monthInfo = getMonthInfo();
+  if(!monthInfo){
+    alert('대상 월을 먼저 선택해 주세요.');
+    return;
+  }
+  if(!monthClosingTemplateBuffer){
+    alert('월마감 양식 .xlsx 파일을 먼저 업로드해 주세요.');
+    return;
+  }
+
+  const btn = document.getElementById('adminMonthClosingBtn');
+  const originalHtml = btn ? btn.innerHTML : '';
+  if(btn){
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ti ti-loader" style="animation:spin .8s linear infinite;font-size:15px"></i> 월마감 생성 중..';
+  }
+
+  try{
+    roster = await ensureRoster();
+    const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
+    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
+    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const dayEntries = Object.entries(dayColumns);
+    if(!blocks.length){
+      throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
+    }
+    if(!dayEntries.length){
+      throw new Error('양식에서 날짜 칸을 찾지 못했습니다. 월 선택값과 양식의 날짜 행이 맞는지 확인해 주세요.');
+    }
+
+    const monthlyData = await collectMonthClosingData(roster, monthInfo);
+    let filledEmployees = 0;
+    let mappedSummaries = 0;
+
+    for(const block of blocks){
+      if(!block.inRow && !block.outRow) continue;
+      const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
+      if(empData.total > 0) filledEmployees++;
+      for(const [, colIndex] of dayEntries){
+        if(block.inRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}));
+        if(block.outRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}));
+      }
+      for(const [dayKey, colIndex] of dayEntries){
+        const day = parseInt(dayKey, 10);
+        const dayData = empData.days[day] || {};
+        if(block.inRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}), dayData['출근'] || 0);
+        if(block.outRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}), dayData['퇴근'] || 0);
+      }
+    }
+
+    for(const [empId, row] of summaryRows.entries()){
+      const empData = monthlyData[empId] || {total:0};
+      setWorksheetNumber(ws, 'BB' + row, empData.total || 0);
+      mappedSummaries++;
+    }
+
+    const out = XLSX.write(workbook, {bookType:'xlsx', type:'array', cellStyles:true, bookSST:true});
+    const monthTag = monthInfo.raw;
+    const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
+    saveAs(
+      new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `${baseName}_${monthTag}_월마감완성.xlsx`
+    );
+
+    setAdminMonthClosingStatus(
+      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했고, 요약 교통비 ${mappedSummaries}행을 갱신했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
+      'good'
+    );
+    toast('월마감 엑셀 다운로드 완료');
+  }catch(e){
+    console.error(e);
+    setAdminMonthClosingStatus('월마감 생성 중 오류가 발생했습니다: ' + e.message, 'bad');
+    alert('월마감 생성 중 오류가 발생했습니다.\n' + e.message);
+  }finally{
+    if(btn){
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  }
+}
+
 function openModal(id){
   const r=records.find(r=>r.id===id); if(!r||!r.img) return;
   document.getElementById('imgModalSrc').src=r.img;
