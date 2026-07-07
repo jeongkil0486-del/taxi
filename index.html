@@ -1890,6 +1890,213 @@ function getMonthInfo(){
   if(!m) return null;
   return {raw, year: parseInt(m[1], 10), month: parseInt(m[2], 10)};
 }
+
+function colLabelToNumber(label){
+  let n = 0;
+  for(const ch of String(label || '').toUpperCase()){
+    if(ch < 'A' || ch > 'Z') break;
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n;
+}
+
+function decodeCellRef(addr){
+  const m = String(addr || '').match(/^([A-Z]+)(\d+)$/i);
+  if(!m) return null;
+  return {col: colLabelToNumber(m[1]), row: parseInt(m[2], 10)};
+}
+
+function decodeRangeRef(ref){
+  const parts = String(ref || '').split(':');
+  const start = decodeCellRef(parts[0]);
+  const end = decodeCellRef(parts[1] || parts[0]);
+  if(!start || !end) return null;
+  return {start, end};
+}
+
+function getXmlChild(node, localName){
+  for(const child of Array.from(node.childNodes || [])){
+    if(child.nodeType === 1 && child.localName === localName) return child;
+  }
+  return null;
+}
+
+function getOrCreateXmlChild(doc, node, localName){
+  let child = getXmlChild(node, localName);
+  if(!child){
+    child = doc.createElementNS(node.namespaceURI, localName);
+    node.appendChild(child);
+  }
+  return child;
+}
+
+function readSharedString(siNode){
+  const parts = [];
+  function walk(node){
+    for(const child of Array.from(node.childNodes || [])){
+      if(child.nodeType !== 1) continue;
+      if(child.localName === 't') parts.push(child.textContent || '');
+      else walk(child);
+    }
+  }
+  walk(siNode);
+  return parts.join('');
+}
+
+async function loadMonthClosingTemplateModel(buffer){
+  const zip = await JSZip.loadAsync(buffer.slice(0));
+  const sheetXmlText = await zip.file('xl/worksheets/sheet1.xml').async('string');
+  const sharedStringsFile = zip.file('xl/sharedStrings.xml');
+  const parser = new DOMParser();
+  const sheetDoc = parser.parseFromString(sheetXmlText, 'application/xml');
+  const sheetDataNode = sheetDoc.getElementsByTagNameNS('*', 'sheetData')[0];
+  const sharedStrings = [];
+  if(sharedStringsFile){
+    const sharedDoc = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
+    const sis = sharedDoc.getElementsByTagNameNS('*', 'si');
+    for(const si of Array.from(sis)) sharedStrings.push(readSharedString(si));
+  }
+
+  const rowMap = new Map();
+  const cellMap = new Map();
+  const rows = sheetDoc.getElementsByTagNameNS('*', 'row');
+  let maxRow = 1;
+  let maxColumn = 1;
+  for(const rowNode of Array.from(rows)){
+    const rowNumber = parseInt(rowNode.getAttribute('r') || '0', 10);
+    if(rowNumber) rowMap.set(rowNumber, rowNode);
+    maxRow = Math.max(maxRow, rowNumber || 1);
+    const cells = rowNode.getElementsByTagNameNS('*', 'c');
+    for(const cellNode of Array.from(cells)){
+      const ref = cellNode.getAttribute('r');
+      if(!ref) continue;
+      cellMap.set(ref, cellNode);
+      const decoded = decodeCellRef(ref);
+      if(decoded) maxColumn = Math.max(maxColumn, decoded.col);
+    }
+  }
+
+  const merges = [];
+  const mergeCells = sheetDoc.getElementsByTagNameNS('*', 'mergeCell');
+  for(const mergeNode of Array.from(mergeCells)){
+    const ref = mergeNode.getAttribute('ref');
+    const decoded = decodeRangeRef(ref);
+    if(decoded) merges.push(decoded);
+  }
+
+  return {zip, sheetDoc, sheetDataNode, sharedStrings, rowMap, cellMap, merges, maxRow, maxColumn};
+}
+
+function readTemplateCell(model, row, col){
+  const addr = excelAddr(row, col);
+  let cellNode = model.cellMap.get(addr) || null;
+  let sourceAddr = addr;
+  if(!cellNode){
+    for(const merge of model.merges){
+      if(
+        row >= merge.start.row && row <= merge.end.row &&
+        col >= merge.start.col && col <= merge.end.col
+      ){
+        sourceAddr = excelAddr(merge.start.row, merge.start.col);
+        cellNode = model.cellMap.get(sourceAddr) || null;
+        break;
+      }
+    }
+  }
+  return {addr, sourceAddr, cellNode};
+}
+
+function getTemplateCellComparableValue(model, cellNode){
+  if(!cellNode) return null;
+  const t = cellNode.getAttribute('t') || '';
+  const vNode = getXmlChild(cellNode, 'v');
+  const isNode = getXmlChild(cellNode, 'is');
+  if(t === 's' && vNode){
+    const idx = parseInt(vNode.textContent || '', 10);
+    return Number.isFinite(idx) ? (model.sharedStrings[idx] ?? '') : '';
+  }
+  if(isNode) return readSharedString(isNode);
+  if(vNode){
+    const raw = vNode.textContent || '';
+    if(raw !== '' && /^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    return raw;
+  }
+  return null;
+}
+
+function getTemplateCellText(model, cellNode){
+  const raw = getTemplateCellComparableValue(model, cellNode);
+  return raw == null ? '' : String(raw).trim();
+}
+
+function compareCellRefs(a, b){
+  const da = decodeCellRef(a);
+  const db = decodeCellRef(b);
+  if(!da || !db) return String(a).localeCompare(String(b));
+  if(da.row !== db.row) return da.row - db.row;
+  return da.col - db.col;
+}
+
+function ensureTemplateRowNode(model, row){
+  let rowNode = model.rowMap.get(row) || null;
+  if(rowNode) return rowNode;
+  rowNode = model.sheetDoc.createElementNS(model.sheetDataNode.namespaceURI, 'row');
+  rowNode.setAttribute('r', String(row));
+  const existingRows = Array.from(model.sheetDataNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'row');
+  const nextRow = existingRows.find(node => parseInt(node.getAttribute('r') || '0', 10) > row);
+  if(nextRow) model.sheetDataNode.insertBefore(rowNode, nextRow);
+  else model.sheetDataNode.appendChild(rowNode);
+  model.rowMap.set(row, rowNode);
+  model.maxRow = Math.max(model.maxRow, row);
+  return rowNode;
+}
+
+function ensureTemplateCellNode(model, row, col){
+  const addr = excelAddr(row, col);
+  let cellNode = model.cellMap.get(addr) || null;
+  if(cellNode) return cellNode;
+  const rowNode = ensureTemplateRowNode(model, row);
+  cellNode = model.sheetDoc.createElementNS(rowNode.namespaceURI, 'c');
+  cellNode.setAttribute('r', addr);
+  const existingCells = Array.from(rowNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'c');
+  const nextCell = existingCells.find(node => compareCellRefs(node.getAttribute('r') || '', addr) > 0);
+  if(nextCell) rowNode.insertBefore(cellNode, nextCell);
+  else rowNode.appendChild(cellNode);
+  model.cellMap.set(addr, cellNode);
+  model.maxColumn = Math.max(model.maxColumn, col);
+  return cellNode;
+}
+
+function setTemplateNumericCellValue(model, row, col, value){
+  const read = readTemplateCell(model, row, col);
+  const cellNode = read.cellNode || ensureTemplateCellNode(model, row, col);
+  if(getXmlChild(cellNode, 'f')){
+    return {ok:false, reason:'formula-cell', cellRef: read.addr};
+  }
+  cellNode.removeAttribute('t');
+  const isNode = getXmlChild(cellNode, 'is');
+  if(isNode) cellNode.removeChild(isNode);
+  if(value == null || value === 0){
+    const vNode = getXmlChild(cellNode, 'v');
+    if(vNode) cellNode.removeChild(vNode);
+    return {ok:false, reason:'empty-or-zero', cellRef: read.addr};
+  }
+  const vNode = getOrCreateXmlChild(model.sheetDoc, cellNode, 'v');
+  vNode.textContent = String(value);
+  return {ok:true, reason:'written', cellRef: read.addr};
+}
+
+async function serializeMonthClosingWorkbook(model){
+  const serializer = new XMLSerializer();
+  const xml = serializer.serializeToString(model.sheetDoc);
+  model.zip.file('xl/worksheets/sheet1.xml', xml);
+  return model.zip.generateAsync({
+    type:'blob',
+    mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    compression:'DEFLATE',
+    compressionOptions:{level:6}
+  });
+}
 function getWsText(ws, addr){
   const cell = ws[addr];
   if(!cell) return '';
@@ -1923,16 +2130,10 @@ function parseSheetDate(cell){
   return null;
 }
 
-function findMonthClosingDayColumns(ws, monthInfo){
+function findMonthClosingDayColumns(){
   const cols = {};
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
-  for(let c = range.s.c; c <= range.e.c; c++){
-    const addr = XLSX.utils.encode_cell({r:12, c});
-    const cell = ws[addr];
-    const parsed = parseSheetDate(cell);
-    if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
-    if(parsed.month && parsed.month !== monthInfo.month) continue;
-    cols[parsed.day] = c;
+  for(let day = 1; day <= 31; day++){
+    cols[day] = 5 + (day - 1);
   }
   return cols;
 }
@@ -2028,10 +2229,10 @@ async function previewAdminMonthClosingTemplate(){
     const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
     const ws = workbook.Sheets[workbook.SheetNames[0]];
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
-    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const dayColumns = findMonthClosingDayColumns();
     const monthLabel = monthInfo.raw.replace('-', '.');
     setAdminMonthClosingStatus(
-      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 감지되었습니다. 대상 월: ${monthLabel}`,
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 고정 매핑되었습니다. 대상 월: ${monthLabel}`,
       (blocks.length && Object.keys(dayColumns).length) ? 'good' : 'warn'
     );
   }catch(e){
@@ -2061,8 +2262,9 @@ async function adminDownloadMonthClosing(){
     roster = await ensureRoster();
     const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
     const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const model = await loadMonthClosingTemplateModel(monthClosingTemplateBuffer);
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
-    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const dayColumns = findMonthClosingDayColumns();
     const dayEntries = Object.entries(dayColumns);
     if(!blocks.length){
       throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
@@ -2073,40 +2275,33 @@ async function adminDownloadMonthClosing(){
 
     const monthlyData = await collectMonthClosingData(roster, monthInfo);
     let filledEmployees = 0;
-    let mappedSummaries = 0;
 
     for(const block of blocks){
       if(!block.inRow && !block.outRow) continue;
       const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
       if(empData.total > 0) filledEmployees++;
       for(const [, colIndex] of dayEntries){
-        if(block.inRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}));
-        if(block.outRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}));
+        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex + 1, null);
+        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex + 1, null);
       }
       for(const [dayKey, colIndex] of dayEntries){
         const day = parseInt(dayKey, 10);
         const dayData = empData.days[day] || {};
-        if(block.inRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}), dayData['출근'] || 0);
-        if(block.outRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}), dayData['퇴근'] || 0);
+        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex + 1, dayData['출근'] || 0);
+        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex + 1, dayData['퇴근'] || 0);
       }
     }
 
-    for(const [empId, row] of summaryRows.entries()){
-      const empData = monthlyData[empId] || {total:0};
-      setWorksheetNumber(ws, 'BB' + row, empData.total || 0);
-      mappedSummaries++;
-    }
-
-    const out = XLSX.write(workbook, {bookType:'xlsx', type:'array', cellStyles:true, bookSST:true});
+    const out = await serializeMonthClosingWorkbook(model);
     const monthTag = monthInfo.raw;
     const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
     saveAs(
-      new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      out,
       `${baseName}_${monthTag}_월마감완성.xlsx`
     );
 
     setAdminMonthClosingStatus(
-      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했고, 요약 교통비 ${mappedSummaries}행을 갱신했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
+      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
       'good'
     );
     toast('월마감 엑셀 다운로드 완료');
