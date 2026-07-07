@@ -1828,6 +1828,29 @@ function getReceiptAmountInfo(receipt){
   };
 }
 
+function normalizeReceiptObject(rawReceipt){
+  if(rawReceipt && typeof rawReceipt === 'object') return rawReceipt;
+  if(typeof rawReceipt === 'string'){
+    try{
+      const parsed = JSON.parse(rawReceipt);
+      if(parsed && typeof parsed === 'object') return parsed;
+    }catch(_){}
+  }
+  return rawReceipt || {};
+}
+
+function extractReceiptArray(rawRecords){
+  if(Array.isArray(rawRecords)) return rawRecords.map(normalizeReceiptObject);
+  if(rawRecords && typeof rawRecords === 'object'){
+    if(Array.isArray(rawRecords.records)) return rawRecords.records.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.items)) return rawRecords.items.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.list)) return rawRecords.list.map(normalizeReceiptObject);
+    if(Array.isArray(rawRecords.data)) return rawRecords.data.map(normalizeReceiptObject);
+    return Object.values(rawRecords).map(normalizeReceiptObject);
+  }
+  return [];
+}
+
 function excelColLabel(n){
   let s = '';
   let x = n;
@@ -2157,18 +2180,30 @@ function findMonthClosingBlocks(model, rosterList){
 
 async function collectMonthClosingData(rosterList, monthInfo){
   let receiptCount = 0;
+  let rawEmployeeSampleLogged = false;
+  let rawReceiptSampleCount = 0;
   const entries = await Promise.all(rosterList.map(async emp=>{
-    const recs = await storeGet(empReceiptsKey(emp.empId), []);
+    const rawRecords = await storeGet(empReceiptsKey(emp.empId), []);
+    const recs = extractReceiptArray(rawRecords);
+    if(!rawEmployeeSampleLogged && recs.length){
+      rawEmployeeSampleLogged = true;
+      console.log(`[MonthClosing] RAW_EMP_RECORD emp=${emp.name} empId=${emp.empId} data=${JSON.stringify(rawRecords).slice(0, 2000)}`);
+    }
     const days = {};
     let total = 0;
     for(const rec of (recs || [])){
+      if(rawReceiptSampleCount < 3){
+        rawReceiptSampleCount++;
+        console.log(`[MonthClosing] RAW_RECEIPT ${JSON.stringify(rec).slice(0, 1000)}`);
+      }
       const parsed = parseReceiptMonthDay(rec.wday);
       if(!parsed || parsed.month !== monthInfo.month) continue;
       receiptCount++;
-      console.log(`[MonthClosing] receipt sample ${JSON.stringify(rec).slice(0, 500)}`);
       const amountInfo = getReceiptAmountInfo(rec);
       if(!amountInfo.hasAmountField){
-        console.log(`[MonthClosing] receipt amount field missing emp=${emp.name} empId=${emp.empId} keys=${Object.keys(rec || {}).join(',')}`);
+        console.log(
+          `[MonthClosing] AMOUNT_FIELD_NOT_FOUND emp=${emp.name} empId=${emp.empId} keys=${Object.keys(rec || {}).join(',')} raw=${JSON.stringify(rec).slice(0, 1000)}`
+        );
       }
       console.log(
         `[MonthClosing] receipt parsed emp=${emp.name} empId=${emp.empId} date=${rec.wday} dir=${rec.inout === '퇴근' ? '퇴근' : '출근'} field=${amountInfo.field || 'none'} rawAmount=${String(amountInfo.rawAmount)} parsedAmount=${amountInfo.parsedAmount}`
