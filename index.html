@@ -2040,13 +2040,15 @@ function parseTemplateCellDate(model, cellNode){
 
 function findMonthClosingDayColumns(model, monthInfo){
   const maxHeaderRow = Math.min(model.maxRow, 24);
+  const startCol = colLabelToNumber('F');
+  const endCol = colLabelToNumber('AJ');
   const inspectedRows = [];
   let best = {rowIndex: -1, dayMap: new Map(), debug: []};
 
   for(let r = 1; r <= maxHeaderRow; r++){
     const dayMap = new Map();
     const debug = [];
-    for(let c = 1; c <= model.maxColumn; c++){
+    for(let c = startCol; c <= Math.min(model.maxColumn, endCol); c++){
       const read = readTemplateCell(model, r, c);
       const rawValue = getTemplateCellComparableValue(model, read.cellNode);
       const displayValue = getTemplateCellText(model, read.cellNode);
@@ -2074,7 +2076,11 @@ function findMonthClosingDayColumns(model, monthInfo){
     console.log('[MonthClosing] day -> column', Array.from(best.dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`));
     console.log(
       '[MonthClosing] 날짜 열 탐색 결과',
-      {headerRow: best.rowIndex, days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))}
+      {
+        headerRow: best.rowIndex,
+        range: 'F~AJ',
+        days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))
+      }
     );
   }
 
@@ -2237,7 +2243,6 @@ async function adminDownloadMonthClosing(){
 
     const monthlyData = await collectMonthClosingData(roster, monthInfo);
     let filledEmployees = 0;
-    let mappedSummaries = 0;
 
     for(const block of blocks){
       if(!block.inRow && !block.outRow) continue;
@@ -2272,12 +2277,6 @@ async function adminDownloadMonthClosing(){
       }
     }
 
-    for(const [empId, row] of summaryRows.entries()){
-      const empData = monthlyData[empId] || {total:0};
-      setTemplateNumericCellValue(model, row, 54, empData.total || 0);
-      mappedSummaries++;
-    }
-
     const out = await serializeMonthClosingWorkbook(model);
     const monthTag = monthInfo.raw;
     const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
@@ -2287,7 +2286,7 @@ async function adminDownloadMonthClosing(){
     );
 
     setAdminMonthClosingStatus(
-      `완료되었습니다. 직원 블록 ${blocks.length}개에 날짜별 금액을 반영했고, 요약 교통비 ${mappedSummaries}행을 갱신했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
+      `완료되었습니다. 직원 블록 ${blocks.length}개에 대해 F~AJ 날짜 칸에만 교통비 금액을 반영했습니다. 실제 금액이 입력된 직원은 ${filledEmployees}명입니다.`,
       'good'
     );
     toast('월마감 엑셀 다운로드 완료');
