@@ -2376,8 +2376,16 @@ async function adminDownloadMonthClosing(){
         if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex, null);
         if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex, null);
       }
-      for(const [day, colIndex] of dayEntries){
-        const dayData = empData.days[day] || {};
+      for(const [dayKey, dayData] of Object.entries(empData.days || {})){
+        const day = parseInt(dayKey, 10);
+        const colIndex = dayScan.dayMap.get(day);
+        if(!colIndex){
+          summary.skippedReasons['missing-day-column'] = (summary.skippedReasons['missing-day-column'] || 0) + 1;
+          console.log(
+            `[MonthClosing] SKIP reason=missing-day-column emp=${block.emp.name} empId=${block.emp.empId} day=${dayKey} allDays=${JSON.stringify(empData.days).slice(0, 1000)}`
+          );
+          continue;
+        }
         console.log(
           `[MonthClosing] AGGREGATE_READ emp=${block.emp.name} empId=${block.emp.empId} day=${day} raw=${JSON.stringify(dayData)} allDays=${JSON.stringify(empData.days).slice(0, 1000)}`
         );
