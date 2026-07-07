@@ -1828,6 +1828,12 @@ function getReceiptAmountInfo(receipt){
   };
 }
 
+function getMonthClosingEmployeeKey(empLike){
+  const empIdKey = normalizeEmpId(empLike && empLike.empId);
+  if(empIdKey) return empIdKey;
+  return normalizeEmpName(empLike && empLike.name);
+}
+
 function normalizeReceiptObject(rawReceipt){
   if(rawReceipt && typeof rawReceipt === 'object') return rawReceipt;
   if(typeof rawReceipt === 'string'){
@@ -2151,7 +2157,7 @@ function findMonthClosingBlocks(model, rosterList){
     const leftName = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, row, 3).cellNode));
     const rightId = normalizeEmpId(getTemplateCellText(model, readTemplateCell(model, row, 52).cellNode));
     const rightName = normalizeEmpName(getTemplateCellText(model, readTemplateCell(model, row, 53).cellNode));
-    const blockEmp = idMap.get(leftId) || nameMap.get(leftName);
+    const blockEmp = (leftId ? idMap.get(leftId) : null) || (!leftId && leftName ? nameMap.get(leftName) : null);
     if(blockEmp){
       let inRow = null;
       let outRow = null;
@@ -2170,7 +2176,7 @@ function findMonthClosingBlocks(model, rosterList){
       });
       blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
     }
-    const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
+    const summaryEmp = (rightId ? idMap.get(rightId) : null) || (!rightId && rightName ? nameMap.get(rightName) : null);
     if(summaryEmp && !summaryRows.has(summaryEmp.empId)){
       summaryRows.set(summaryEmp.empId, row);
     }
@@ -2184,6 +2190,7 @@ async function collectMonthClosingData(rosterList, monthInfo){
   let rawReceiptSampleCount = 0;
   let aggregateSampleLogged = false;
   const entries = await Promise.all(rosterList.map(async emp=>{
+    const aggregateKey = getMonthClosingEmployeeKey(emp);
     const rawRecords = await storeGet(empReceiptsKey(emp.empId), []);
     const recs = extractReceiptArray(rawRecords);
     if(!rawEmployeeSampleLogged && recs.length){
@@ -2221,9 +2228,9 @@ async function collectMonthClosingData(rosterList, monthInfo){
     }
     if(!aggregateSampleLogged && Object.keys(days).length){
       aggregateSampleLogged = true;
-      console.log(`[MonthClosing] AGGREGATE_SAMPLE emp=${emp.name} empId=${emp.empId} days=${JSON.stringify(days)}`);
+      console.log(`[MonthClosing] AGGREGATE_SAMPLE emp=${emp.name} empId=${emp.empId} key=${aggregateKey} days=${JSON.stringify(days)}`);
     }
-    return [emp.empId, {emp, days, total}];
+    return [aggregateKey, {emp, days, total}];
   }));
   return {data: Object.fromEntries(entries), receiptCount};
 }
@@ -2361,7 +2368,9 @@ async function adminDownloadMonthClosing(){
     for(const block of blocks){
       if(!block.inRow && !block.outRow) continue;
       summary.mappedEmployeeCount++;
-      const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
+      const readKey = getMonthClosingEmployeeKey(block.emp);
+      const empData = monthlyData[readKey] || {days:{}, total:0};
+      console.log(`[MonthClosing] EMPDATA_LOOKUP emp=${block.emp.name} empId=${block.emp.empId} key=${readKey} found=${!!monthlyData[readKey]}`);
       if(empData.total > 0) filledEmployees++;
       for(const [, colIndex] of dayEntries){
         if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex, null);
