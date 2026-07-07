@@ -1888,6 +1888,8 @@ async function loadMonthClosingTemplateModel(buffer){
   const sharedStringsFile = zip.file('xl/sharedStrings.xml');
   const parser = new DOMParser();
   const sheetDoc = parser.parseFromString(sheetXmlText, 'application/xml');
+  const worksheetNode = sheetDoc.getElementsByTagNameNS('*', 'worksheet')[0];
+  const sheetDataNode = sheetDoc.getElementsByTagNameNS('*', 'sheetData')[0];
   const sharedStrings = [];
   if(sharedStringsFile){
     const sharedDoc = parser.parseFromString(await sharedStringsFile.async('string'), 'application/xml');
@@ -1929,7 +1931,7 @@ async function loadMonthClosingTemplateModel(buffer){
     maxColumn = Math.max(maxColumn, dimRange.end.col);
   }
 
-  return {zip, sheetDoc, sharedStrings, rowMap, cellMap, merges, maxRow, maxColumn};
+  return {zip, sheetDoc, worksheetNode, sheetDataNode, sharedStrings, rowMap, cellMap, merges, maxRow, maxColumn};
 }
 
 function readTemplateCell(model, row, col){
@@ -1974,6 +1976,44 @@ function getTemplateCellComparableValue(model, cellNode){
 function getTemplateCellText(model, cellNode){
   const raw = getTemplateCellComparableValue(model, cellNode);
   return raw == null ? '' : String(raw).trim();
+}
+
+function compareCellRefs(a, b){
+  const da = decodeCellRef(a);
+  const db = decodeCellRef(b);
+  if(!da || !db) return String(a).localeCompare(String(b));
+  if(da.row !== db.row) return da.row - db.row;
+  return da.col - db.col;
+}
+
+function ensureTemplateRowNode(model, row){
+  let rowNode = model.rowMap.get(row) || null;
+  if(rowNode) return rowNode;
+  rowNode = model.sheetDoc.createElementNS(model.sheetDataNode.namespaceURI, 'row');
+  rowNode.setAttribute('r', String(row));
+  const existingRows = Array.from(model.sheetDataNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'row');
+  const nextRow = existingRows.find(node => parseInt(node.getAttribute('r') || '0', 10) > row);
+  if(nextRow) model.sheetDataNode.insertBefore(rowNode, nextRow);
+  else model.sheetDataNode.appendChild(rowNode);
+  model.rowMap.set(row, rowNode);
+  model.maxRow = Math.max(model.maxRow, row);
+  return rowNode;
+}
+
+function ensureTemplateCellNode(model, row, col){
+  const addr = excelAddr(row, col);
+  let cellNode = model.cellMap.get(addr) || null;
+  if(cellNode) return cellNode;
+  const rowNode = ensureTemplateRowNode(model, row);
+  cellNode = model.sheetDoc.createElementNS(rowNode.namespaceURI, 'c');
+  cellNode.setAttribute('r', addr);
+  const existingCells = Array.from(rowNode.childNodes || []).filter(node=>node.nodeType === 1 && node.localName === 'c');
+  const nextCell = existingCells.find(node => compareCellRefs(node.getAttribute('r') || '', addr) > 0);
+  if(nextCell) rowNode.insertBefore(cellNode, nextCell);
+  else rowNode.appendChild(cellNode);
+  model.cellMap.set(addr, cellNode);
+  model.maxColumn = Math.max(model.maxColumn, col);
+  return cellNode;
 }
 
 function parseTemplateCellDate(model, cellNode){
@@ -2031,6 +2071,7 @@ function findMonthClosingDayColumns(model, monthInfo){
   if(best.dayMap.size === 0){
     console.log('[MonthClosing] 날짜 열 탐색 실패. 검사한 행/셀 목록:', inspectedRows);
   }else{
+    console.log('[MonthClosing] day -> column', Array.from(best.dayMap.entries()).map(([day, col])=>`${day} -> ${excelColLabel(col)}`));
     console.log(
       '[MonthClosing] 날짜 열 탐색 결과',
       {headerRow: best.rowIndex, days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))}
@@ -2060,6 +2101,13 @@ function findMonthClosingBlocks(model, rosterList){
         if(label === '교통비' && sub === '출근') inRow = r;
         if(label === '교통비' && sub === '퇴근') outRow = r;
       }
+      console.log('[MonthClosing] 직원 매핑', {
+        empName: blockEmp.name,
+        empId: blockEmp.empId,
+        startRow: row,
+        inRow,
+        outRow
+      });
       blocks.push({emp: blockEmp, baseRow: row, inRow, outRow});
     }
     const summaryEmp = idMap.get(rightId) || nameMap.get(rightName);
@@ -2078,6 +2126,13 @@ async function collectMonthClosingData(rosterList, monthInfo){
     for(const rec of (recs || [])){
       const parsed = parseReceiptMonthDay(rec.wday);
       if(!parsed || parsed.month !== monthInfo.month) continue;
+      console.log('[MonthClosing] 월별 영수증 집계', {
+        empName: emp.name,
+        empId: emp.empId,
+        date: rec.wday,
+        amount: Number(rec.amount) || 0,
+        direction: rec.inout === '퇴근' ? '퇴근' : '출근'
+      });
       const dayBucket = days[parsed.day] || {출근: 0, 퇴근: 0};
       const key = rec.inout === '퇴근' ? '퇴근' : '출근';
       const amount = Number(rec.amount) || 0;
@@ -2092,10 +2147,7 @@ async function collectMonthClosingData(rosterList, monthInfo){
 
 function setTemplateNumericCellValue(model, row, col, value){
   const read = readTemplateCell(model, row, col);
-  const cellNode = read.cellNode;
-  if(!cellNode){
-    throw new Error(`양식 셀 ${read.addr} 을(를) 찾지 못했습니다.`);
-  }
+  const cellNode = read.cellNode || ensureTemplateCellNode(model, row, col);
   if(getXmlChild(cellNode, 'f')){
     console.log('[MonthClosing] 수식 셀은 건드리지 않습니다:', read.addr);
     return;
@@ -2197,8 +2249,26 @@ async function adminDownloadMonthClosing(){
       }
       for(const [day, colIndex] of dayEntries){
         const dayData = empData.days[day] || {};
-        if(block.inRow) setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
-        if(block.outRow) setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
+        if(block.inRow){
+          console.log('[MonthClosing] 셀 쓰기', {
+            cellRef: excelAddr(block.inRow, colIndex),
+            amount: dayData['출근'] || 0,
+            empName: block.emp.name,
+            day,
+            direction: '출근'
+          });
+          setTemplateNumericCellValue(model, block.inRow, colIndex, dayData['출근'] || 0);
+        }
+        if(block.outRow){
+          console.log('[MonthClosing] 셀 쓰기', {
+            cellRef: excelAddr(block.outRow, colIndex),
+            amount: dayData['퇴근'] || 0,
+            empName: block.emp.name,
+            day,
+            direction: '퇴근'
+          });
+          setTemplateNumericCellValue(model, block.outRow, colIndex, dayData['퇴근'] || 0);
+        }
       }
     }
 
