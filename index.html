@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.8.0/dist/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <style>
@@ -1798,74 +1798,82 @@ function parseReceiptMonthDay(wday){
   return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
 }
 
-function getWsText(ws, addr){
-  const cell = getWorksheetCell(ws, XLSX.utils.decode_cell(addr));
-  if(!cell) return '';
-  if(cell.v != null && String(cell.v).trim() !== '') return String(cell.v).trim();
-  if(cell.w != null && cell.w !== '') return String(cell.w).trim();
-  if(cell.v instanceof Date){
-    const mm = String(cell.v.getMonth() + 1).padStart(2, '0');
-    const dd = String(cell.v.getDate()).padStart(2, '0');
-    return mm + '/' + dd;
+function excelColLabel(n){
+  let s = '';
+  let x = n;
+  while(x > 0){
+    const mod = (x - 1) % 26;
+    s = String.fromCharCode(65 + mod) + s;
+    x = Math.floor((x - 1) / 26);
   }
-  return String(cell.v == null ? '' : cell.v).trim();
+  return s;
 }
 
-function getWorksheetCell(ws, cellRef){
-  const directAddr = XLSX.utils.encode_cell(cellRef);
-  if(ws[directAddr]) return ws[directAddr];
-  const merges = ws['!merges'] || [];
-  for(const merge of merges){
-    if(
-      cellRef.r >= merge.s.r && cellRef.r <= merge.e.r &&
-      cellRef.c >= merge.s.c && cellRef.c <= merge.e.c
-    ){
-      return ws[XLSX.utils.encode_cell(merge.s)] || null;
-    }
-  }
-  return null;
+function excelAddr(row, col){
+  return excelColLabel(col) + String(row);
 }
 
-function readWorksheetCell(ws, rowIndex, colIndex){
-  const cellRef = {r: rowIndex, c: colIndex};
-  const requestedAddr = XLSX.utils.encode_cell(cellRef);
-  const directCell = ws[requestedAddr];
-  if(directCell){
-    return {addr: requestedAddr, sourceAddr: requestedAddr, cell: directCell};
-  }
-  const merges = ws['!merges'] || [];
-  for(const merge of merges){
-    if(
-      rowIndex >= merge.s.r && rowIndex <= merge.e.r &&
-      colIndex >= merge.s.c && colIndex <= merge.e.c
-    ){
-      const sourceAddr = XLSX.utils.encode_cell(merge.s);
-      return {addr: requestedAddr, sourceAddr, cell: ws[sourceAddr] || null};
-    }
-  }
-  return {addr: requestedAddr, sourceAddr: requestedAddr, cell: null};
-}
-
-function parseSheetDate(cell){
+function getExcelCellComparableValue(cell){
   if(!cell) return null;
-  if(cell.v instanceof Date){
-    return {year: cell.v.getFullYear(), month: cell.v.getMonth() + 1, day: cell.v.getDate()};
+  const value = cell.value;
+  if(value == null) return null;
+  if(value instanceof Date) return value;
+  if(typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') return value;
+  if(typeof value === 'object'){
+    if(value.result != null) return value.result;
+    if(Array.isArray(value.richText)) return value.richText.map(part=>part.text || '').join('');
+    if(value.text != null) return value.text;
+    if(value.hyperlink != null) return value.text || value.hyperlink;
   }
-  if(typeof cell.v === 'number'){
-    if(Number.isInteger(cell.v) && cell.v >= 1 && cell.v <= 31){
-      return {day: cell.v};
-    }
-    if(XLSX && XLSX.SSF){
-      const parsed = XLSX.SSF.parse_date_code(cell.v);
-      if(parsed && parsed.y && parsed.m && parsed.d){
-        return {year: parsed.y, month: parsed.m, day: parsed.d};
-      }
-    }
+  return value;
+}
+
+function getExcelCellText(cell){
+  if(!cell) return '';
+  const raw = getExcelCellComparableValue(cell);
+  if(raw != null && String(raw).trim() !== '') return String(raw).trim();
+  if(cell.text != null && String(cell.text).trim() !== '') return String(cell.text).trim();
+  return '';
+}
+
+function readExcelCell(ws, rowIndex, colIndex){
+  const cell = ws.getRow(rowIndex).getCell(colIndex);
+  const sourceCell = cell && cell.isMerged ? cell.master : cell;
+  return {
+    addr: excelAddr(rowIndex, colIndex),
+    sourceAddr: sourceCell ? sourceCell.address : excelAddr(rowIndex, colIndex),
+    cell: sourceCell || null
+  };
+}
+
+function parseExcelSerialDate(serial){
+  if(typeof serial !== 'number' || !isFinite(serial) || serial < 1) return null;
+  const wholeDays = Math.floor(serial);
+  if(wholeDays <= 31) return null;
+  const utcDays = wholeDays > 59 ? wholeDays - 1 : wholeDays;
+  const ms = (utcDays - 25569) * 86400 * 1000;
+  const date = new Date(ms);
+  if(Number.isNaN(date.getTime())) return null;
+  return {year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate()};
+}
+
+function parseExcelCellDate(cell){
+  if(!cell) return null;
+  const raw = getExcelCellComparableValue(cell);
+  if(raw instanceof Date){
+    return {year: raw.getFullYear(), month: raw.getMonth() + 1, day: raw.getDate()};
   }
-  const rawText = cell.v == null ? '' : String(cell.v).trim();
-  const displayText = cell.w == null ? '' : String(cell.w).trim();
-  const texts = [rawText, displayText].filter(Boolean);
-  for(const text of texts){
+  if(typeof raw === 'number'){
+    if(Number.isInteger(raw) && raw >= 1 && raw <= 31){
+      return {day: raw};
+    }
+    const parsedSerial = parseExcelSerialDate(raw);
+    if(parsedSerial) return parsedSerial;
+  }
+  const texts = [];
+  if(raw != null) texts.push(String(raw).trim());
+  if(cell.text != null) texts.push(String(cell.text).trim());
+  for(const text of texts.filter(Boolean)){
     let m = text.match(/^(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
     if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
     m = text.match(/^(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
@@ -1886,31 +1894,31 @@ function getMonthInfo(){
 }
 
 function findMonthClosingDayColumns(ws, monthInfo){
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
-  const maxHeaderRow = Math.min(range.e.r, 24);
+  const maxHeaderRow = Math.min(Math.max(ws.rowCount || 1, ws.actualRowCount || 1), 24);
+  const maxColumn = Math.max(ws.columnCount || 1, ws.actualColumnCount || 1);
   const inspectedRows = [];
   let best = {rowIndex: -1, dayMap: new Map(), debug: []};
 
-  for(let r = range.s.r; r <= maxHeaderRow; r++){
+  for(let r = 1; r <= maxHeaderRow; r++){
     const dayMap = new Map();
     const debug = [];
-    for(let c = range.s.c; c <= range.e.c; c++){
-      const read = readWorksheetCell(ws, r, c);
-      const rawValue = read.cell && read.cell.v != null ? read.cell.v : '';
-      const displayValue = read.cell && read.cell.w != null ? read.cell.w : '';
-      const parsed = parseSheetDate(read.cell);
+    for(let c = 1; c <= maxColumn; c++){
+      const read = readExcelCell(ws, r, c);
+      const rawValue = getExcelCellComparableValue(read.cell);
+      const displayValue = read.cell ? read.cell.text : '';
+      const parsed = parseExcelCellDate(read.cell);
       debug.push({
         addr: read.addr,
         sourceAddr: read.sourceAddr,
         v: rawValue,
-        w: displayValue,
+        text: displayValue,
         parsed: parsed ? `${parsed.year || ''}/${parsed.month || ''}/${parsed.day || ''}` : ''
       });
       if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
       if(parsed.month && parsed.month !== monthInfo.month) continue;
       if(!dayMap.has(parsed.day)) dayMap.set(parsed.day, c);
     }
-    inspectedRows.push({row: r + 1, cells: debug});
+    inspectedRows.push({row: r, cells: debug});
     if(dayMap.size > best.dayMap.size){
       best = {rowIndex: r, dayMap, debug};
     }
@@ -1921,7 +1929,7 @@ function findMonthClosingDayColumns(ws, monthInfo){
   }else{
     console.log(
       '[MonthClosing] 날짜 열 탐색 결과',
-      {headerRow: best.rowIndex + 1, days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr:XLSX.utils.encode_cell({r:best.rowIndex, c:col})}))}
+      {headerRow: best.rowIndex, days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr: excelAddr(best.rowIndex, col)}))}
     );
   }
 
@@ -1931,21 +1939,21 @@ function findMonthClosingDayColumns(ws, monthInfo){
 function findMonthClosingBlocks(ws, rosterList){
   const idMap = new Map(rosterList.map(emp=>[normalizeEmpId(emp.empId), emp]));
   const nameMap = new Map(rosterList.map(emp=>[normalizeEmpName(emp.name), emp]));
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
   const blocks = [];
   const summaryRows = new Map();
-  for(let row = range.s.r + 1; row <= range.e.r + 1; row++){
-    const leftId = normalizeEmpId(getWsText(ws, 'B' + row));
-    const leftName = normalizeEmpName(getWsText(ws, 'C' + row));
-    const rightId = normalizeEmpId(getWsText(ws, 'AZ' + row));
-    const rightName = normalizeEmpName(getWsText(ws, 'BA' + row));
+  const maxRow = Math.max(ws.rowCount || 1, ws.actualRowCount || 1);
+  for(let row = 1; row <= maxRow; row++){
+    const leftId = normalizeEmpId(getExcelCellText(readExcelCell(ws, row, 2).cell));
+    const leftName = normalizeEmpName(getExcelCellText(readExcelCell(ws, row, 3).cell));
+    const rightId = normalizeEmpId(getExcelCellText(readExcelCell(ws, row, 52).cell));
+    const rightName = normalizeEmpName(getExcelCellText(readExcelCell(ws, row, 53).cell));
     const blockEmp = idMap.get(leftId) || nameMap.get(leftName);
     if(blockEmp){
       let inRow = null;
       let outRow = null;
-      for(let r = row; r <= Math.min(row + 6, range.e.r + 1); r++){
-        const label = normalizeEmpName(getWsText(ws, 'D' + r));
-        const sub = normalizeEmpName(getWsText(ws, 'E' + r));
+      for(let r = row; r <= Math.min(row + 6, maxRow); r++){
+        const label = normalizeEmpName(getExcelCellText(readExcelCell(ws, r, 4).cell));
+        const sub = normalizeEmpName(getExcelCellText(readExcelCell(ws, r, 5).cell));
         if(label === '교통비' && sub === '출근') inRow = r;
         if(label === '교통비' && sub === '퇴근') outRow = r;
       }
@@ -1979,26 +1987,16 @@ async function collectMonthClosingData(rosterList, monthInfo){
   return Object.fromEntries(entries);
 }
 
-function clearWorksheetCell(ws, addr){
-  const cell = ws[addr];
-  if(!cell) return;
-  delete cell.v;
-  delete cell.w;
-  delete cell.f;
-  cell.t = 'z';
+function clearExcelCellValue(ws, row, col){
+  ws.getCell(row, col).value = null;
 }
 
-function setWorksheetNumber(ws, addr, value){
+function setExcelCellNumber(ws, row, col, value){
   if(!value){
-    clearWorksheetCell(ws, addr);
+    clearExcelCellValue(ws, row, col);
     return;
   }
-  const cell = ws[addr] || {};
-  cell.t = 'n';
-  cell.v = value;
-  delete cell.w;
-  delete cell.f;
-  ws[addr] = cell;
+  ws.getCell(row, col).value = value;
 }
 
 async function previewAdminMonthClosingTemplate(){
@@ -2016,13 +2014,14 @@ async function previewAdminMonthClosingTemplate(){
     return;
   }
   try{
-    const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
-    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(monthClosingTemplateBuffer.slice(0));
+    const ws = workbook.worksheets[0];
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
     const dayScan = findMonthClosingDayColumns(ws, monthInfo);
     const monthLabel = monthInfo.raw.replace('-', '.');
     setAdminMonthClosingStatus(
-      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 감지되었습니다. 대상 월: ${monthLabel}${dayScan.rowIndex >= 0 ? `, 날짜 행: ${dayScan.rowIndex + 1}행` : ''}`,
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 감지되었습니다. 대상 월: ${monthLabel}${dayScan.rowIndex >= 0 ? `, 날짜 행: ${dayScan.rowIndex}행` : ''}`,
       (blocks.length && dayScan.dayMap.size) ? 'good' : 'warn'
     );
   }catch(e){
@@ -2050,8 +2049,9 @@ async function adminDownloadMonthClosing(){
 
   try{
     roster = await ensureRoster();
-    const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
-    const ws = workbook.Sheets[workbook.SheetNames[0]];
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(monthClosingTemplateBuffer.slice(0));
+    const ws = workbook.worksheets[0];
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
     const dayScan = findMonthClosingDayColumns(ws, monthInfo);
     const dayEntries = Array.from(dayScan.dayMap.entries());
@@ -2071,23 +2071,23 @@ async function adminDownloadMonthClosing(){
       const empData = monthlyData[block.emp.empId] || {days:{}, total:0};
       if(empData.total > 0) filledEmployees++;
       for(const [, colIndex] of dayEntries){
-        if(block.inRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}));
-        if(block.outRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}));
+        if(block.inRow) clearExcelCellValue(ws, block.inRow, colIndex);
+        if(block.outRow) clearExcelCellValue(ws, block.outRow, colIndex);
       }
       for(const [day, colIndex] of dayEntries){
         const dayData = empData.days[day] || {};
-        if(block.inRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}), dayData['출근'] || 0);
-        if(block.outRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}), dayData['퇴근'] || 0);
+        if(block.inRow) setExcelCellNumber(ws, block.inRow, colIndex, dayData['출근'] || 0);
+        if(block.outRow) setExcelCellNumber(ws, block.outRow, colIndex, dayData['퇴근'] || 0);
       }
     }
 
     for(const [empId, row] of summaryRows.entries()){
       const empData = monthlyData[empId] || {total:0};
-      setWorksheetNumber(ws, 'BB' + row, empData.total || 0);
+      setExcelCellNumber(ws, row, 54, empData.total || 0);
       mappedSummaries++;
     }
 
-    const out = XLSX.write(workbook, {bookType:'xlsx', type:'array', cellStyles:true, bookSST:true});
+    const out = await workbook.xlsx.writeBuffer();
     const monthTag = monthInfo.raw;
     const baseName = (monthClosingTemplateName || '월마감 양식.xlsx').replace(/\.xlsx$/i, '');
     saveAs(
