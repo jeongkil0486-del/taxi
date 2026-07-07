@@ -1799,8 +1799,9 @@ function parseReceiptMonthDay(wday){
 }
 
 function getWsText(ws, addr){
-  const cell = ws[addr];
+  const cell = getWorksheetCell(ws, XLSX.utils.decode_cell(addr));
   if(!cell) return '';
+  if(cell.v != null && String(cell.v).trim() !== '') return String(cell.v).trim();
   if(cell.w != null && cell.w !== '') return String(cell.w).trim();
   if(cell.v instanceof Date){
     const mm = String(cell.v.getMonth() + 1).padStart(2, '0');
@@ -1810,24 +1811,70 @@ function getWsText(ws, addr){
   return String(cell.v == null ? '' : cell.v).trim();
 }
 
+function getWorksheetCell(ws, cellRef){
+  const directAddr = XLSX.utils.encode_cell(cellRef);
+  if(ws[directAddr]) return ws[directAddr];
+  const merges = ws['!merges'] || [];
+  for(const merge of merges){
+    if(
+      cellRef.r >= merge.s.r && cellRef.r <= merge.e.r &&
+      cellRef.c >= merge.s.c && cellRef.c <= merge.e.c
+    ){
+      return ws[XLSX.utils.encode_cell(merge.s)] || null;
+    }
+  }
+  return null;
+}
+
+function readWorksheetCell(ws, rowIndex, colIndex){
+  const cellRef = {r: rowIndex, c: colIndex};
+  const requestedAddr = XLSX.utils.encode_cell(cellRef);
+  const directCell = ws[requestedAddr];
+  if(directCell){
+    return {addr: requestedAddr, sourceAddr: requestedAddr, cell: directCell};
+  }
+  const merges = ws['!merges'] || [];
+  for(const merge of merges){
+    if(
+      rowIndex >= merge.s.r && rowIndex <= merge.e.r &&
+      colIndex >= merge.s.c && colIndex <= merge.e.c
+    ){
+      const sourceAddr = XLSX.utils.encode_cell(merge.s);
+      return {addr: requestedAddr, sourceAddr, cell: ws[sourceAddr] || null};
+    }
+  }
+  return {addr: requestedAddr, sourceAddr: requestedAddr, cell: null};
+}
+
 function parseSheetDate(cell){
   if(!cell) return null;
   if(cell.v instanceof Date){
     return {year: cell.v.getFullYear(), month: cell.v.getMonth() + 1, day: cell.v.getDate()};
   }
-  if(typeof cell.v === 'number' && XLSX && XLSX.SSF){
-    const parsed = XLSX.SSF.parse_date_code(cell.v);
-    if(parsed && parsed.y && parsed.m && parsed.d){
-      return {year: parsed.y, month: parsed.m, day: parsed.d};
+  if(typeof cell.v === 'number'){
+    if(Number.isInteger(cell.v) && cell.v >= 1 && cell.v <= 31){
+      return {day: cell.v};
+    }
+    if(XLSX && XLSX.SSF){
+      const parsed = XLSX.SSF.parse_date_code(cell.v);
+      if(parsed && parsed.y && parsed.m && parsed.d){
+        return {year: parsed.y, month: parsed.m, day: parsed.d};
+      }
     }
   }
-  const text = String(cell.w || cell.v || '').trim();
-  let m = text.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})$/);
-  if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
-  m = text.match(/^(\d{1,2})[.\-/](\d{1,2})$/);
-  if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
-  m = text.match(/^(\d{1,2})$/);
-  if(m) return {day: parseInt(m[1], 10)};
+  const rawText = cell.v == null ? '' : String(cell.v).trim();
+  const displayText = cell.w == null ? '' : String(cell.w).trim();
+  const texts = [rawText, displayText].filter(Boolean);
+  for(const text of texts){
+    let m = text.match(/^(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
+    if(m) return {year: parseInt(m[1], 10), month: parseInt(m[2], 10), day: parseInt(m[3], 10)};
+    m = text.match(/^(\d{1,2})[.\-/월\s]+(\d{1,2})일?$/);
+    if(m) return {month: parseInt(m[1], 10), day: parseInt(m[2], 10)};
+    m = text.match(/^(\d{1,2})일$/);
+    if(m) return {day: parseInt(m[1], 10)};
+    m = text.match(/^(\d{1,2})$/);
+    if(m) return {day: parseInt(m[1], 10)};
+  }
   return null;
 }
 
@@ -1839,17 +1886,46 @@ function getMonthInfo(){
 }
 
 function findMonthClosingDayColumns(ws, monthInfo){
-  const cols = {};
   const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
-  for(let c = range.s.c; c <= range.e.c; c++){
-    const addr = XLSX.utils.encode_cell({r:12, c});
-    const cell = ws[addr];
-    const parsed = parseSheetDate(cell);
-    if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
-    if(parsed.month && parsed.month !== monthInfo.month) continue;
-    cols[parsed.day] = c;
+  const maxHeaderRow = Math.min(range.e.r, 24);
+  const inspectedRows = [];
+  let best = {rowIndex: -1, dayMap: new Map(), debug: []};
+
+  for(let r = range.s.r; r <= maxHeaderRow; r++){
+    const dayMap = new Map();
+    const debug = [];
+    for(let c = range.s.c; c <= range.e.c; c++){
+      const read = readWorksheetCell(ws, r, c);
+      const rawValue = read.cell && read.cell.v != null ? read.cell.v : '';
+      const displayValue = read.cell && read.cell.w != null ? read.cell.w : '';
+      const parsed = parseSheetDate(read.cell);
+      debug.push({
+        addr: read.addr,
+        sourceAddr: read.sourceAddr,
+        v: rawValue,
+        w: displayValue,
+        parsed: parsed ? `${parsed.year || ''}/${parsed.month || ''}/${parsed.day || ''}` : ''
+      });
+      if(!parsed || !parsed.day || parsed.day < 1 || parsed.day > 31) continue;
+      if(parsed.month && parsed.month !== monthInfo.month) continue;
+      if(!dayMap.has(parsed.day)) dayMap.set(parsed.day, c);
+    }
+    inspectedRows.push({row: r + 1, cells: debug});
+    if(dayMap.size > best.dayMap.size){
+      best = {rowIndex: r, dayMap, debug};
+    }
   }
-  return cols;
+
+  if(best.dayMap.size === 0){
+    console.log('[MonthClosing] 날짜 열 탐색 실패. 검사한 행/셀 목록:', inspectedRows);
+  }else{
+    console.log(
+      '[MonthClosing] 날짜 열 탐색 결과',
+      {headerRow: best.rowIndex + 1, days: Array.from(best.dayMap.entries()).map(([day, col])=>({day, col, addr:XLSX.utils.encode_cell({r:best.rowIndex, c:col})}))}
+    );
+  }
+
+  return {...best, inspectedRows};
 }
 
 function findMonthClosingBlocks(ws, rosterList){
@@ -1943,11 +2019,11 @@ async function previewAdminMonthClosingTemplate(){
     const workbook = XLSX.read(monthClosingTemplateBuffer, {type:'array', cellDates:true, cellStyles:true});
     const ws = workbook.Sheets[workbook.SheetNames[0]];
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
-    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
+    const dayScan = findMonthClosingDayColumns(ws, monthInfo);
     const monthLabel = monthInfo.raw.replace('-', '.');
     setAdminMonthClosingStatus(
-      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${Object.keys(dayColumns).length}일이 감지되었습니다. 대상 월: ${monthLabel}`,
-      (blocks.length && Object.keys(dayColumns).length) ? 'good' : 'warn'
+      `${monthClosingTemplateName} 분석 완료. 직원 블록 ${blocks.length}개, 요약 행 ${summaryRows.size}개, 날짜 칸 ${dayScan.dayMap.size}일이 감지되었습니다. 대상 월: ${monthLabel}${dayScan.rowIndex >= 0 ? `, 날짜 행: ${dayScan.rowIndex + 1}행` : ''}`,
+      (blocks.length && dayScan.dayMap.size) ? 'good' : 'warn'
     );
   }catch(e){
     setAdminMonthClosingStatus('양식 분석 중 오류가 발생했습니다: ' + e.message, 'bad');
@@ -1977,8 +2053,8 @@ async function adminDownloadMonthClosing(){
     const workbook = XLSX.read(monthClosingTemplateBuffer.slice(0), {type:'array', cellDates:true, cellStyles:true});
     const ws = workbook.Sheets[workbook.SheetNames[0]];
     const {blocks, summaryRows} = findMonthClosingBlocks(ws, roster);
-    const dayColumns = findMonthClosingDayColumns(ws, monthInfo);
-    const dayEntries = Object.entries(dayColumns);
+    const dayScan = findMonthClosingDayColumns(ws, monthInfo);
+    const dayEntries = Array.from(dayScan.dayMap.entries());
     if(!blocks.length){
       throw new Error('양식에서 직원 블록을 찾지 못했습니다. 제공하신 월마감 양식 구조와 다른 파일인지 확인해 주세요.');
     }
@@ -1998,8 +2074,7 @@ async function adminDownloadMonthClosing(){
         if(block.inRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}));
         if(block.outRow) clearWorksheetCell(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}));
       }
-      for(const [dayKey, colIndex] of dayEntries){
-        const day = parseInt(dayKey, 10);
+      for(const [day, colIndex] of dayEntries){
         const dayData = empData.days[day] || {};
         if(block.inRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.inRow - 1, c:colIndex}), dayData['출근'] || 0);
         if(block.outRow) setWorksheetNumber(ws, XLSX.utils.encode_cell({r:block.outRow - 1, c:colIndex}), dayData['퇴근'] || 0);
